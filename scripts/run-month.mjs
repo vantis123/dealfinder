@@ -20,7 +20,7 @@ const ROOT = join(__dirname, '..');               // standalone repo root (where
 const OUT = join(tmpdir(), 'dealfinder-cases');     // PDFs are processed then deleted — temp only
 const env=Object.fromEntries(readFileSync(`${ROOT}/.env`,'utf8').split('\n').filter(l=>l.includes('=')&&!l.trim().startsWith('#')).map(l=>{const i=l.indexOf('=');return[l.slice(0,i).trim(),l.slice(i+1).trim()];}));
 const CAP=env.CAPSOLVER_API_KEY,BL=env.BROWSERLESS_API_KEY;
-const CONCURRENCY=parseInt(process.env.CONCURRENCY||'6',10);
+const CONCURRENCY=parseInt(process.env.CONCURRENCY||'1',10); // 1 = reliable; the clerk flakes on parallel searches from one IP
 const USE_AI=process.env.USE_AI==='1';
 const anthropic=new Anthropic({apiKey:env.ANTHROPIC_API_KEY||'no-key'}); // calls are wrapped in try/catch; OCR is the primary path
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
@@ -245,11 +245,14 @@ fillTokens=false;
 //    value-with-apify.mjs values every address, recomputes spread/worth-it, updates Supabase + the sheet.
 scrapeDone=true;
 log('valuation pass (Apify Zillow)…');
-try{ execFileSync('node',[join(__dirname,'value-with-apify.mjs')],{stdio:'inherit',env:process.env}); }
+try{ execFileSync(process.execPath,[join(__dirname,'value-with-apify.mjs')],{stdio:'inherit',env:process.env}); }
 catch(e){ log('apify valuation step failed',String(e.message).slice(0,60)); }
 
 // (door-knock CSV is written by value-with-apify.mjs from Supabase, with final Zillow values)
+// read the real worth-it count back from Supabase (the Apify subprocess set flagged there)
+let knockCount=nKnock;
+try{ const {count}=await sb.from('foreclosure_leads').select('*',{count:'exact',head:true}).eq('flagged',true).eq('scan_month',MONTH).eq('scan_year',YEAR); if(count!=null) knockCount=count; }catch(e){}
 const mins=((Date.now()-tStart)/60000).toFixed(1);
-setStatus({running:false,done:recs.length,total:recs.length||total,knock:nKnock,review:nReview,recent:recent.slice(0,12),tokensIn:tokIn,tokensOut:tokOut,aiCostUsd:Number(cost().toFixed(4)),mode:USE_AI?'ai':'ocr',workers:CONCURRENCY,minutes:Number(mins),finishedAt:new Date().toISOString()});
-log(`DONE in ${mins} min | ${recs.length} cases | KNOCK ${nKnock} | review ${nReview} | tokens ${tokIn}/${tokOut} ($${cost().toFixed(3)})`);
+setStatus({running:false,done:recs.length,total:recs.length||total,knock:knockCount,review:nReview,recent:recent.slice(0,12),tokensIn:tokIn,tokensOut:tokOut,aiCostUsd:Number(cost().toFixed(4)),mode:USE_AI?'ai':'ocr',workers:CONCURRENCY,minutes:Number(mins),finishedAt:new Date().toISOString()});
+log(`DONE in ${mins} min | ${recs.length} cases | KNOCK ${knockCount} | review ${nReview} | tokens ${tokIn}/${tokOut} ($${cost().toFixed(3)})`);
 process.exit(0);
