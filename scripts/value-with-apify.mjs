@@ -52,13 +52,13 @@ if (rows.length) {
     const patch = { zillow_value: z, spread, flagged, updated_at: new Date().toISOString() };
     if (flagged) { patch.review_status = 'auto'; patch.review_reason = null; }
     await sb.from('foreclosure_leads').update(patch).eq('case_number', r.case_number);
-    await syncToSheet({ ...r, zillow_value: z, spread, flagged, review_status: flagged ? 'auto' : undefined });
   }
   console.log(`valued ${valued}/${rows.length} | WORTH-IT (spread ≥ $200k): ${worth}`);
 }
 
-// write the authoritative door-knock CSV from Supabase (worth-it first)
+// pull the FULL final rows once, then sync the sheet from complete data (no partial overwrites)
 const { data: all } = await sb.from('foreclosure_leads').select('*').order('flagged', { ascending: false, nullsFirst: false }).order('spread', { ascending: false, nullsFirst: false });
+if (SHEET) { console.log(`syncing ${(all || []).length} rows to the sheet…`); for (const r of all || []) { await syncToSheet(r); await sleep(300); } }
 const esc = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
 const head = ['Case Number', 'Plaintiff (Bank)', 'Defendant (Owner)', 'Filing Type', 'Property Address', 'Owed +$10K', 'Zillow Value', 'Spread', 'Knock?', 'Complaint Link', 'Value Link', 'Docket Link', 'Status'];
 const lines = [head.map(esc).join(',')];
