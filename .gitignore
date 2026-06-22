@@ -1,0 +1,8 @@
+node_modules
+.next
+.env
+.env.local
+scan-status.json
+door-knock-leads.csv
+*.log
+.DS_Store
