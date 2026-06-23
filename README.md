@@ -24,9 +24,24 @@ You'll paste an API key from each into `.env`.
 
 ---
 
-## Setup (one time, ~5 minutes)
+## Install (one command)
+
+Paste this into a terminal — it clones the repo and installs everything (Node packages,
+the Camoufox browser, and the PDF/OCR tools):
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/vantis123/dealfinder/main/install.sh | bash
+```
+
+Then `cd dealfinder`, fill in `.env`, and you're ready (steps 1–2 below).
+
+---
+
+## Setup (manual alternative)
+
+```bash
+git clone https://github.com/vantis123/dealfinder
+cd dealfinder
 bash setup.sh
 ```
 
