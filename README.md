@@ -33,7 +33,11 @@ the Camoufox browser, and the PDF/OCR tools):
 curl -fsSL https://raw.githubusercontent.com/vantis123/dealfinder/main/install.sh | bash
 ```
 
-Then `cd dealfinder`, fill in `.env`, and you're ready (steps 1–2 below).
+It installs **Node.js automatically** (via nvm, no admin password) and downloads everything —
+you don't need git or Node beforehand. Then `cd dealfinder`, fill in `.env`, and you're ready.
+
+> On Mac it also installs Homebrew + the PDF tools automatically. If your Mac asks for your
+> password during the Homebrew step, that's the one manual moment — enter it once.
 
 ---
 

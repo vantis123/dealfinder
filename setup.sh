@@ -21,10 +21,12 @@ if ! need_tool pdftotext || ! need_tool tesseract; then
   OS="$(uname -s)"
   if [ "$OS" = "Darwin" ]; then
     if ! command -v brew >/dev/null 2>&1; then
-      echo "❌ Homebrew not found. Install it from https://brew.sh then re-run, or 'brew install poppler tesseract' manually."
-      exit 1
+      echo "Homebrew not found — installing it (for the PDF tools)…"
+      NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
+      eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null || true)"
     fi
-    brew install poppler tesseract
+    if command -v brew >/dev/null 2>&1; then brew install poppler tesseract
+    else echo "⚠ Homebrew install needs your admin password — run it once manually:"; echo "    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""; echo "    then: brew install poppler tesseract && bash setup.sh"; fi
   elif [ -f /etc/debian_version ]; then
     sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr
   elif command -v dnf >/dev/null 2>&1; then
