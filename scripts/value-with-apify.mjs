@@ -6,9 +6,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createClient } from '@supabase/supabase-js';
+import { loadEnv } from './_env.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const env = Object.fromEntries(readFileSync(`${ROOT}/.env`, 'utf8').split('\n').filter(l => l.includes('=') && !l.trim().startsWith('#')).map(l => { const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim()]; }));
+const env = loadEnv(ROOT); // .env locally, process.env on Railway/containers
 const APIFY = env.APIFY_API_TOKEN;
 const SHEET = env.SHEET_WEBHOOK_URL || '';
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });

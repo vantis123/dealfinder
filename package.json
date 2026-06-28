@@ -8,9 +8,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "onboard": "node scripts/onboard.mjs",
     "db:setup": "node scripts/db-setup.mjs",
     "scan": "node scripts/run-month.mjs",
     "value": "node scripts/value-with-apify.mjs",
+    "notify": "node scripts/notify-telegram.mjs",
+    "daily": "node scripts/daily.mjs",
     "postinstall": "node node_modules/camoufox-js/dist/__main__.js fetch || true"
   },
   "dependencies": {

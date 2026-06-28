@@ -13,12 +13,14 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { loadEnv } from './_env.mjs';
+import { saveDocToStorage } from './_storage.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');               // standalone repo root (where .env lives)
 const OUT = join(tmpdir(), 'dealfinder-cases');     // PDFs are processed then deleted — temp only
-const env=Object.fromEntries(readFileSync(`${ROOT}/.env`,'utf8').split('\n').filter(l=>l.includes('=')&&!l.trim().startsWith('#')).map(l=>{const i=l.indexOf('=');return[l.slice(0,i).trim(),l.slice(i+1).trim()];}));
+const env=loadEnv(ROOT);                            // .env locally, process.env on Railway/containers
 const CAP=env.CAPSOLVER_API_KEY,BL=env.BROWSERLESS_API_KEY;
 const CONCURRENCY=parseInt(process.env.CONCURRENCY||'1',10); // 1 = reliable; the clerk flakes on parallel searches from one IP
 const USE_AI=process.env.USE_AI==='1';
@@ -34,7 +36,10 @@ const MONTH=parseInt(process.env.SCAN_MONTH||String(now.getMonth()+1),10);
 const YEAR=parseInt(process.env.SCAN_YEAR||String(now.getFullYear()),10);
 const yy=String(YEAR).slice(-2);
 const lastDay=new Date(YEAR,MONTH,0).getDate();
-const DATE_FROM=`${MONTH}/1/${yy}`, DATE_TO=`${MONTH}/${lastDay}/${yy}`;
+// Explicit date range (from the dashboard / daily cron) overrides the whole-month default. ISO YYYY-MM-DD → M/D/yy.
+const isoMDyy=s=>{const[Y,M,D]=s.split('-').map(Number);return `${M}/${D}/${String(Y).slice(-2)}`;};
+const DATE_FROM=process.env.DATE_FROM?isoMDyy(process.env.DATE_FROM):`${MONTH}/1/${yy}`;
+const DATE_TO=process.env.DATE_TO?isoMDyy(process.env.DATE_TO):`${MONTH}/${lastDay}/${yy}`;
 const STATUS=join(ROOT,'scan-status.json');
 
 let tokIn=0,tokOut=0,ocrN=0;
@@ -149,7 +154,7 @@ const hoa=/homeowner|condominium|\bcondo\b|community (owners|assoc)|master assoc
 
 // ---- shared progress ----
 const recs=[]; const recent=[]; let nKnock=0,nReview=0,done=0,total=0;
-const setStatus=o=>{try{writeFileSync(STATUS,JSON.stringify({month:MONTH,year:YEAR,...o},null,2));}catch(e){}};
+const setStatus=o=>{try{writeFileSync(STATUS,JSON.stringify({county:env.COUNTY||'Orange',month:MONTH,year:YEAR,from:DATE_FROM,to:DATE_TO,...o},null,2));}catch(e){}};
 const pushStatus=(extra={})=>setStatus({running:true,done,total,knock:nKnock,review:nReview,recent:recent.slice(0,12),tokensIn:tokIn,tokensOut:tokOut,aiCostUsd:Number(cost().toFixed(4)),mode:USE_AI?'ai':'ocr',workers:CONCURRENCY,...extra});
 // live Google Sheet sync — POST each finished case to an Apps Script webhook (set SHEET_WEBHOOK_URL in .env.local)
 const SHEET_WEBHOOK=env.SHEET_WEBHOOK_URL||'';
@@ -221,10 +226,13 @@ async function worker(slot){
         const info=await sess.p.evaluate(()=>{const L=[...document.querySelectorAll('a[href*="/DocView/Doc"]')];const pick=re=>{const a=L.find(x=>re.test(x.getAttribute('aria-label')||''));return a?new URL(a.getAttribute('href'),location.origin).href:null;};return{path:location.pathname,complaint:pick(/complaint/i),value:pick(/value of real property/i),n:L.length};});
         if(!/CaseDetails/i.test(info.path)) throw new Error('docket_blocked');
         // store the DOCUMENT LINKS (not the files) + the docket link
-        rec.docketUrl=sess.p.url(); rec.complaintUrl=info.complaint||null; rec.valueUrl=info.value||null;
-        // process each PDF in a TEMP file → extract → DELETE. Nothing kept on disk.
-        if(rec.complaintUrl){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(rec.complaintUrl); writeFileSync(tmp,Buffer.from(await r.body())); rec.propertyAddress=addr(tmp);}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
-        if(rec.valueUrl){ const tmp=`/tmp/df-val-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(rec.valueUrl); writeFileSync(tmp,Buffer.from(await r.body())); const v=await owed(tmp); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
+        rec.docketUrl=sess.p.url();
+        // Download each PDF → extract → SAVE to Supabase Storage (Orange links die ~30 min post-scan) → store
+        // the permanent URL. Fall back to the (expiring) county link only if the upload fails.
+        const srcComplaint=info.complaint||null, srcValue=info.value||null;
+        rec.complaintUrl=null; rec.valueUrl=null;
+        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
+        if(srcValue){ const tmp=`/tmp/df-val-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcValue); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); const v=await owed(tmp); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; rec.valueUrl=await saveDocToStorage(sb,rec.caseNumber,'value',buf)||srcValue;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
       }catch(e){ rec.reviewReason='err:'+String(e.message).slice(0,24); }
       rec.complaintX=!rec.complaintUrl; rec.valueX=!rec.valueUrl;
       const o=(rec.principalDue||0)+(rec.interestOwed||0); rec.totalOwed=o||null; rec.owedWithBuffer=o?o+10000:null;
@@ -250,9 +258,16 @@ catch(e){ log('apify valuation step failed',String(e.message).slice(0,60)); }
 
 // (door-knock CSV is written by value-with-apify.mjs from Supabase, with final Zillow values)
 // read the real worth-it count back from Supabase (the Apify subprocess set flagged there)
-let knockCount=nKnock;
-try{ const {count}=await sb.from('foreclosure_leads').select('*',{count:'exact',head:true}).eq('flagged',true).eq('scan_month',MONTH).eq('scan_year',YEAR); if(count!=null) knockCount=count; }catch(e){}
+// Summarize ONLY this run's leads (touched since tStart), not the whole month.
+let knockCount=nKnock, reviewCount=nReview, pipelineAdded=0, notWorth=0;
+try{ const since=new Date(tStart).toISOString(); const {data}=await sb.from('foreclosure_leads').select('flagged,review_status,spread').eq('county',env.COUNTY||'Orange').gte('updated_at',since); let k=0,rv=0,nw=0; for(const r of data||[]){ if(r.flagged){k++; pipelineAdded+=Number(r.spread)||0;} else if(r.review_status==='manual_review') rv++; else nw++; } if((data||[]).length){ knockCount=k; reviewCount=rv; notWorth=nw; } }catch(e){}
 const mins=((Date.now()-tStart)/60000).toFixed(1);
-setStatus({running:false,done:recs.length,total:recs.length||total,knock:knockCount,review:nReview,recent:recent.slice(0,12),tokensIn:tokIn,tokensOut:tokOut,aiCostUsd:Number(cost().toFixed(4)),mode:USE_AI?'ai':'ocr',workers:CONCURRENCY,minutes:Number(mins),finishedAt:new Date().toISOString()});
+setStatus({running:false,county:env.COUNTY||'Orange',done:recs.length,total:recs.length||total,knock:knockCount,review:reviewCount,notWorth,pipelineAdded,recent:recent.slice(0,12),tokensIn:tokIn,tokensOut:tokOut,aiCostUsd:Number(cost().toFixed(4)),mode:USE_AI?'ai':'ocr',workers:CONCURRENCY,minutes:Number(mins),finishedAt:new Date().toISOString()});
 log(`DONE in ${mins} min | ${recs.length} cases | KNOCK ${knockCount} | review ${nReview} | tokens ${tokIn}/${tokOut} ($${cost().toFixed(3)})`);
+
+// Telegram report after a manual scan. daily.mjs sets NOTIFY_ON_SCAN=0 and sends one combined report itself.
+if(env.TELEGRAM_BOT_TOKEN && process.env.NOTIFY_ON_SCAN!=='0'){
+  try{ const {notifyTelegram}=await import('./notify-telegram.mjs'); log('telegram:',JSON.stringify(await notifyTelegram())); }
+  catch(e){ log('telegram failed',String(e.message).slice(0,60)); }
+}
 process.exit(0);

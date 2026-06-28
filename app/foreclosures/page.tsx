@@ -1,21 +1,30 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Header } from "@/components/layout/header";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, cn } from "@/lib/utils";
-import { MapPin, FileText, FileX2, ExternalLink, Calendar, Play, Loader2 } from "lucide-react";
+import { MapPin, FileText, FileX2, ExternalLink, Calendar, Play, Loader2, Table2, LayoutGrid } from "lucide-react";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const NOW = new Date();
+const isoDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const MONTH_START = `${NOW.getFullYear()}-${String(NOW.getMonth() + 1).padStart(2, "0")}-01`;
+const TODAY_ISO = isoDate(NOW);
+
+interface ScanSummary {
+  county?: string; month?: number; year?: number; from?: string; to?: string; total?: number;
+  knock?: number; review?: number; notWorth?: number; pipelineAdded?: number;
+}
 
 interface Lead {
   caseNumber: string;
   plaintiff: string;
   defendant: string;
   type: string;
+  county?: string;
   propertyAddress?: string | null;
   totalOwed?: number | null;
   owedWithBuffer?: number | null;
@@ -57,14 +66,18 @@ export default function ForeclosuresPage() {
   const [loading, setLoading] = useState(true);
   const [minSpread, setMinSpread] = useState(200000);
   const [view, setView] = useState<"knock" | "review" | "all">("knock");
+  const [viewMode, setViewMode] = useState<"table" | "cards">("table");
   const [q, setQ] = useState("");
   // scan state
   const [scanOpen, setScanOpen] = useState(false);
-  const [scanMonth, setScanMonth] = useState(NOW.getMonth() + 1);
-  const [scanYear, setScanYear] = useState(NOW.getFullYear());
+  const [scanCounty, setScanCounty] = useState<"Orange" | "Seminole">("Orange");
+  const [scanFrom, setScanFrom] = useState(MONTH_START);
+  const [scanTo, setScanTo] = useState(TODAY_ISO);
+  const [summary, setSummary] = useState<ScanSummary | null>(null); // scan / daily-update overlay
+  const seenFinish = useRef<string | null>(null);
   const [scan, setScan] = useState<{
-    running?: boolean; done?: number; total?: number; month?: number; year?: number;
-    knock?: number; review?: number; mode?: string; aiCostUsd?: number;
+    running?: boolean; done?: number; total?: number; month?: number; year?: number; from?: string; to?: string; county?: string;
+    knock?: number; review?: number; notWorth?: number; pipelineAdded?: number; mode?: string; aiCostUsd?: number; finishedAt?: string;
     recent?: { caseNumber: string; address?: string | null; spread?: number | null; flagged?: boolean; x?: boolean }[];
   } | null>(null);
 
@@ -82,6 +95,22 @@ export default function ForeclosuresPage() {
       const s = await (await fetch("/api/foreclosures/scan")).json();
       setScan(s);
       load(); // refresh the board live as leads come in (option 3: work the list while it fills)
+      // Show the summary overlay the first time we see a freshly-finished scan — covers both an in-session
+      // scan completing AND a user logging in after the daily cron ran (the "daily update").
+      if (s && !s.running && s.finishedAt) {
+        const recent = Date.now() - new Date(s.finishedAt).getTime() < 24 * 3600 * 1000;
+        const lastSeen = seenFinish.current ?? (typeof window !== "undefined" ? localStorage.getItem("df_lastScanSeen") : null);
+        if (recent && s.finishedAt !== lastSeen) {
+          seenFinish.current = s.finishedAt;
+          if (typeof window !== "undefined") localStorage.setItem("df_lastScanSeen", s.finishedAt);
+          setSummary({
+            county: s.county, from: s.from, to: s.to, month: s.month, year: s.year, total: s.total ?? s.done,
+            knock: s.knock, review: s.review,
+            notWorth: s.notWorth ?? Math.max(0, (s.total ?? s.done ?? 0) - (s.knock ?? 0) - (s.review ?? 0)),
+            pipelineAdded: s.pipelineAdded,
+          });
+        }
+      }
       setTimeout(pollScan, s?.running ? 3500 : 12000); // keep polling forever; faster while scanning
     } catch { setTimeout(pollScan, 8000); }
   }
@@ -90,9 +119,9 @@ export default function ForeclosuresPage() {
   async function runScan() {
     const res = await fetch("/api/foreclosures/scan", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ month: scanMonth, year: scanYear }),
+      body: JSON.stringify({ county: scanCounty, from: scanFrom, to: scanTo }),
     });
-    if (res.ok) { setScanOpen(false); setScan({ running: true, done: 0, total: 0, month: scanMonth, year: scanYear }); setTimeout(pollScan, 3000); }
+    if (res.ok) { setScanOpen(false); setScan({ running: true, done: 0, total: 0, county: scanCounty, from: scanFrom, to: scanTo }); setTimeout(pollScan, 3000); }
     else { const e = await res.json(); alert(e.error || "Could not start scan"); }
   }
 
@@ -111,6 +140,7 @@ export default function ForeclosuresPage() {
     if (q && !(`${l.propertyAddress} ${l.defendant} ${l.plaintiff} ${l.caseNumber}`.toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
+  const sorted = [...filtered].sort((a, b) => (b.spread ?? -Infinity) - (a.spread ?? -Infinity));
 
   return (
     <div className="flex min-h-screen">
@@ -126,7 +156,7 @@ export default function ForeclosuresPage() {
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-3 text-sm">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <span>Scanning <b>{MONTHS[(scan.month || 1) - 1]} {scan.year}</b> — <b>{scan.done || 0}/{scan.total || "…"}</b></span>
+                  <span>Scanning <b>{scan.county || "Orange"}</b> · <b>{scan.from && scan.to ? `${scan.from} → ${scan.to}` : `${MONTHS[(scan.month || 1) - 1]} ${scan.year}`}</b> — <b>{scan.done || 0}/{scan.total || "…"}</b></span>
                   <span className="text-emerald-400">🚪 {scan.knock || 0} knock</span>
                   <span className="text-amber-400">⚠ {scan.review || 0} review</span>
                   <span className="rounded bg-muted px-2 py-0.5 text-xs">
@@ -151,15 +181,24 @@ export default function ForeclosuresPage() {
             ) : (
               <div className="flex flex-wrap items-center gap-3 text-sm">
                 <Calendar className="h-4 w-4 text-muted-foreground" />
-                <span className="text-muted-foreground">Scan which month?</span>
-                <select value={scanMonth} onChange={(e) => setScanMonth(Number(e.target.value))}
-                  className="rounded-lg border border-border bg-background px-2 py-1.5">
-                  {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+                <span className="text-muted-foreground">County</span>
+                <select value={scanCounty} onChange={(e) => setScanCounty(e.target.value as "Orange" | "Seminole")}
+                  className="rounded-lg border border-border bg-background px-2 py-1.5 font-medium">
+                  <option value="Orange">Orange</option>
+                  <option value="Seminole">Seminole</option>
                 </select>
-                <select value={scanYear} onChange={(e) => setScanYear(Number(e.target.value))}
-                  className="rounded-lg border border-border bg-background px-2 py-1.5">
-                  {[NOW.getFullYear(), NOW.getFullYear() - 1, NOW.getFullYear() - 2].map((y) => <option key={y} value={y}>{y}</option>)}
-                </select>
+                <span className="text-muted-foreground">from</span>
+                <input type="date" value={scanFrom} max={scanTo} onChange={(e) => setScanFrom(e.target.value)}
+                  className="rounded-lg border border-border bg-background px-2 py-1.5" />
+                <span className="text-muted-foreground">to</span>
+                <input type="date" value={scanTo} min={scanFrom} max={TODAY_ISO} onChange={(e) => setScanTo(e.target.value)}
+                  className="rounded-lg border border-border bg-background px-2 py-1.5" />
+                <div className="flex gap-1">
+                  <button onClick={() => { setScanFrom(TODAY_ISO); setScanTo(TODAY_ISO); }} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent">Today</button>
+                  <button onClick={() => { const f = new Date(); f.setDate(f.getDate() - 7); setScanFrom(isoDate(f)); setScanTo(TODAY_ISO); }} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent">7d</button>
+                  <button onClick={() => { const f = new Date(); f.setDate(f.getDate() - 30); setScanFrom(isoDate(f)); setScanTo(TODAY_ISO); }} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent">30d</button>
+                  <button onClick={() => { setScanFrom(MONTH_START); setScanTo(TODAY_ISO); }} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent">Month</button>
+                </div>
                 <button onClick={runScan}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-medium text-primary-foreground hover:opacity-90">
                   <Play className="h-4 w-4" /> Run Scan
@@ -172,7 +211,7 @@ export default function ForeclosuresPage() {
 
         {/* Stats */}
         <div className="flex items-center gap-8 px-6 py-4 border-b border-border">
-          <Stat label="Total CA Filings" value={String(stats.total)} />
+          <Stat label="Total Filings" value={String(stats.total)} />
           <Stat label="Worth Knocking" value={String(stats.knock)} accent="text-emerald-400" />
           <Stat label="Need Manual Review" value={String(stats.review)} accent="text-amber-400" />
           <Stat label="Total Equity in Play" value={formatCurrency(stats.totalEquity)} accent="text-primary" />
@@ -196,20 +235,136 @@ export default function ForeclosuresPage() {
               <span className="font-semibold text-foreground w-20">{formatCurrency(minSpread)}</span>
             </label>
           )}
-          <input placeholder="Search address / owner / case…" value={q} onChange={(e) => setQ(e.target.value)}
-            className="ml-auto rounded-lg border border-border bg-background px-3 py-1.5 text-sm w-64" />
+          <div className="ml-auto flex items-center gap-3">
+            <div className="flex rounded-lg border border-border overflow-hidden text-sm">
+              <button onClick={() => setViewMode("table")} title="Table view"
+                className={cn("px-2.5 py-1.5 flex items-center gap-1", viewMode === "table" ? "bg-primary text-primary-foreground" : "hover:bg-accent")}>
+                <Table2 className="h-4 w-4" /> Table
+              </button>
+              <button onClick={() => setViewMode("cards")} title="Card view"
+                className={cn("px-2.5 py-1.5 flex items-center gap-1", viewMode === "cards" ? "bg-primary text-primary-foreground" : "hover:bg-accent")}>
+                <LayoutGrid className="h-4 w-4" /> Cards
+              </button>
+            </div>
+            <input placeholder="Search address / owner / case…" value={q} onChange={(e) => setQ(e.target.value)}
+              className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm w-64" />
+          </div>
         </div>
 
-        {/* Cards */}
+        {/* Leads */}
         <div className="p-6">
           {loading ? <p className="text-muted-foreground">Loading leads…</p> :
-            filtered.length === 0 ? <p className="text-muted-foreground">No leads in this view yet. The monthly pull populates them.</p> :
+            sorted.length === 0 ? <p className="text-muted-foreground">No leads in this view yet. Run a scan to populate them.</p> :
+            viewMode === "table" ? <LeadTable leads={sorted} onKnock={setKnock} /> :
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filtered.map((l) => <LeadCard key={l.caseNumber} l={l} onKnock={setKnock} />)}
+              {sorted.map((l) => <LeadCard key={l.caseNumber} l={l} onKnock={setKnock} />)}
             </div>}
         </div>
+
+        {/* Post-scan summary overlay */}
+        {summary && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setSummary(null)}>
+            <div className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <h2 className="text-lg font-bold">Latest scan ✓</h2>
+              <p className="text-xs text-muted-foreground mb-4">
+                <b className="text-foreground">{summary.county || "Orange"}</b>
+                {summary.from && summary.to ? ` · ${summary.from} → ${summary.to}` : summary.month ? ` · ${MONTHS[summary.month - 1]} ${summary.year}` : ""} · {summary.total ?? 0} cases scanned
+              </p>
+              <div className="grid grid-cols-3 gap-3">
+                <SumStat n={summary.knock ?? 0} label="Doors to knock" emoji="🚪" accent="text-emerald-400" />
+                <SumStat n={summary.review ?? 0} label="Manual review" emoji="⚠" accent="text-amber-400" />
+                <SumStat n={summary.notWorth ?? 0} label="Not worth it" emoji="✗" accent="text-muted-foreground" />
+              </div>
+              <div className="mt-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-4 text-center">
+                <p className="text-xs text-muted-foreground">Added to pipeline</p>
+                <p className="text-3xl font-extrabold text-emerald-400">{formatCurrency(summary.pipelineAdded ?? 0)}</p>
+              </div>
+              <button onClick={() => setSummary(null)}
+                className="mt-5 w-full rounded-lg bg-primary py-2.5 font-medium text-primary-foreground hover:opacity-90">
+                View leads
+              </button>
+            </div>
+          </div>
+        )}
       </main>
     </div>
+  );
+}
+
+function SumStat({ n, label, emoji, accent }: { n: number; label: string; emoji: string; accent?: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-background p-3 text-center">
+      <p className={cn("text-2xl font-extrabold", accent)}>{n}</p>
+      <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{emoji} {label}</p>
+    </div>
+  );
+}
+
+function LeadTable({ leads, onKnock }: { leads: Lead[]; onKnock: (c: string, s: string) => void }) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full text-sm">
+        <thead className="bg-card/60 text-xs uppercase tracking-wide text-muted-foreground sticky top-0">
+          <tr className="text-left">
+            <th className="px-3 py-2.5 font-medium">Spread</th>
+            <th className="px-3 py-2.5 font-medium">Property</th>
+            <th className="px-3 py-2.5 font-medium text-right">Owed</th>
+            <th className="px-3 py-2.5 font-medium text-right">Zillow</th>
+            <th className="px-3 py-2.5 font-medium">Owner / Bank</th>
+            <th className="px-3 py-2.5 font-medium">Links</th>
+            <th className="px-3 py-2.5 font-medium">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {leads.map((l) => <LeadRow key={l.caseNumber} l={l} onKnock={onKnock} />)}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LeadRow({ l, onKnock }: { l: Lead; onKnock: (c: string, s: string) => void }) {
+  const flagged = !!l.flagged;
+  const review = l.reviewStatus === "manual_review";
+  return (
+    <tr className={cn("border-t border-border hover:bg-accent/40 align-top",
+      flagged && "bg-emerald-500/[0.05]", review && !flagged && "bg-amber-500/[0.04]")}>
+      <td className="px-3 py-2.5 whitespace-nowrap">
+        <span className={cn("font-bold text-base", flagged ? "text-emerald-400" : review ? "text-amber-400/80" : "text-muted-foreground")}>
+          {l.spread != null ? formatCurrency(l.spread) : "—"}
+        </span>
+        {flagged && <span className="ml-1.5 text-xs">🚪</span>}
+      </td>
+      <td className="px-3 py-2.5 max-w-[280px]">
+        {l.propertyAddress ? (
+          <a href={mapsUrl(l.propertyAddress)} target="_blank" rel="noreferrer" className="font-medium hover:text-primary inline-flex items-start gap-1">
+            <MapPin className="h-3.5 w-3.5 mt-0.5 flex-shrink-0 opacity-50" />{l.propertyAddress}
+          </a>
+        ) : <span className="italic text-muted-foreground">address not pulled</span>}
+        <div className="text-[11px] text-muted-foreground mt-0.5">{l.caseNumber}{l.county ? ` · ${l.county}` : ""}</div>
+      </td>
+      <td className="px-3 py-2.5 text-right whitespace-nowrap">{l.owedWithBuffer != null ? formatCurrency(l.owedWithBuffer) : "—"}</td>
+      <td className="px-3 py-2.5 text-right whitespace-nowrap">{l.zillowValue != null ? formatCurrency(l.zillowValue) : "—"}</td>
+      <td className="px-3 py-2.5 max-w-[190px]">
+        <div className="truncate font-medium text-foreground">{l.defendant || "—"}</div>
+        <div className="truncate text-[11px] text-muted-foreground">{l.plaintiff}</div>
+      </td>
+      <td className="px-3 py-2.5 whitespace-nowrap text-sm">
+        <div className="flex items-center gap-2">
+          {l.propertyAddress && <a href={mapsUrl(l.propertyAddress)} target="_blank" rel="noreferrer" title="Map / Street View" className="hover:opacity-70">📍</a>}
+          {l.propertyAddress && <a href={zillowUrl(l.propertyAddress)} target="_blank" rel="noreferrer" title="Zillow" className="hover:opacity-70">🏠</a>}
+          {l.complaintUrl ? <a href={l.complaintUrl} target="_blank" rel="noreferrer" title="Complaint" className="text-primary font-semibold text-xs hover:underline">C</a> : <span title="No complaint" className="text-red-400/60 text-xs">C</span>}
+          {l.valueUrl ? <a href={l.valueUrl} target="_blank" rel="noreferrer" title="Value sheet" className="text-primary font-semibold text-xs hover:underline">V</a> : <span title="No value sheet" className="text-red-400/60 text-xs">V</span>}
+          {l.docketUrl && <a href={l.docketUrl} target="_blank" rel="noreferrer" title="Docket" className="text-muted-foreground text-xs hover:text-primary">D</a>}
+        </div>
+      </td>
+      <td className="px-3 py-2.5">
+        <select value={l.knock?.status || "new"} onChange={(e) => onKnock(l.caseNumber, e.target.value)}
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs">
+          {KNOCK_STATUSES.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+        </select>
+      </td>
+    </tr>
   );
 }
 
