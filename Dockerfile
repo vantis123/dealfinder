@@ -1,6 +1,7 @@
 # DealFinder container — serves the dashboard (web service) AND can run the scrapers/daily cron.
 # Bakes in poppler (pdftotext/pdftoppm), tesseract OCR, and the Camoufox stealth browser + libs.
-FROM node:20-bookworm-slim
+# Node 22+ required: the Supabase client needs native WebSocket (absent in Node 20).
+FROM node:22-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NEXT_TELEMETRY_DISABLED=1
