@@ -5,9 +5,11 @@ FROM node:20-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     NEXT_TELEMETRY_DISABLED=1
 
-# pdftotext / pdftoppm (poppler) + OCR (tesseract) + base fonts/certs for the browser
+# pdftotext / pdftoppm (poppler) + OCR (tesseract) + fonts/certs + python3/build-essential
+# (node-gyp needs them to compile native deps like better-sqlite3 pulled in by the browser lib).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       poppler-utils tesseract-ocr ca-certificates fonts-liberation curl \
+      python3 build-essential \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
