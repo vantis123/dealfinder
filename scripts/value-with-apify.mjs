@@ -1,7 +1,6 @@
 // Value every lead's property via Apify's Zillow Detail Scraper (rotating proxies — no IP blocking),
 // recompute spread + worth-it, update Supabase, sync the sheet, and write the door-knock CSV.
 // Run on its own (node scripts/value-with-apify.mjs) or automatically at the end of run-month.mjs.
-import pg from 'pg';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -19,10 +18,13 @@ const syncToSheet = async r => { if (!SHEET) return; try { await fetch(SHEET, { 
 
 if (!APIFY) { console.log('APIFY_API_TOKEN missing in .env — skipping valuation'); process.exit(0); }
 
-const c = new pg.Client({ connectionString: env.DIRECT_URL, ssl: { rejectUnauthorized: false } });
-await c.connect();
+// Fetch leads to value over the Supabase HTTPS API — NOT direct Postgres. Railway can't reach Supabase's
+// IPv6-only :5432 endpoint (ENETUNREACH); the REST API always works.
 const ONLY_MISSING = process.env.ALL !== '1';
-const { rows } = await c.query(`select case_number, property_address, owed_with_buffer from foreclosure_leads where property_address is not null ${ONLY_MISSING ? 'and zillow_value is null' : ''}`);
+let lq = sb.from('foreclosure_leads').select('case_number, property_address, owed_with_buffer').not('property_address', 'is', null).limit(5000);
+if (ONLY_MISSING) lq = lq.is('zillow_value', null);
+const { data: lqData } = await lq;
+const rows = lqData || [];
 console.log(`valuing ${rows.length} addresses via Apify…`);
 
 if (rows.length) {
@@ -66,5 +68,4 @@ const lines = [head.map(esc).join(',')];
 for (const r of all || []) lines.push([r.case_number, r.plaintiff, r.defendant, r.type, r.property_address || '', r.owed_with_buffer || '', r.zillow_value || '', r.spread || '', r.flagged ? 'KNOCK' : (r.review_status === 'manual_review' ? 'REVIEW' : ''), r.complaint_url || '', r.value_url || '', r.docket_url || '', r.review_status].map(esc).join(','));
 writeFileSync(join(ROOT, 'door-knock-leads.csv'), lines.join('\n'));
 console.log(`wrote door-knock-leads.csv (${(all || []).length} rows)`);
-await c.end();
 process.exit(0);
