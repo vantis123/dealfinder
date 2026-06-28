@@ -22,7 +22,7 @@
     "camoufox-js": "^0.11.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.460.0",
-    "next": "15.3.3",
+    "next": "^15.5.19",
     "pg": "^8.22.0",
     "playwright": "1.58.2",
     "playwright-core": "1.58.2",
