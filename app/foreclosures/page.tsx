@@ -440,8 +440,24 @@ function LeadCard({ l, onKnock }: { l: Lead; onKnock: (c: string, s: string) => 
       {/* Parties + numbers */}
       <div className="mt-2 text-xs text-muted-foreground space-y-0.5">
         <p><span className="text-foreground font-medium">{l.defendant || "—"}</span> &nbsp;·&nbsp; {l.plaintiff}</p>
-        <p>{l.caseNumber} &nbsp;·&nbsp; {l.type}</p>
+        <p>{l.caseNumber} &nbsp;·&nbsp; {l.type}{l.filingDate ? ` · 📅 filed ${l.filingDate}` : ""}</p>
       </div>
+
+      {/* Skip-trace phones */}
+      {l.phones && l.phones.length > 0 && (
+        <div className="mt-2 rounded-lg bg-emerald-500/5 border border-emerald-500/15 p-2">
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {l.phones.slice(0, 4).map((ph, i) => (
+              <a key={i} href={`tel:${ph.phone.replace(/\D/g, "")}`} title={ph.sources.join(" + ")}
+                className="text-xs font-semibold text-emerald-400 hover:underline">
+                📞 {ph.phone}{ph.sources.length > 1 ? " ✓✓" : ""}
+              </a>
+            ))}
+          </div>
+          {l.skiptraceName && <p className="mt-0.5 text-[10px] text-muted-foreground">contact: {l.skiptraceName}</p>}
+        </div>
+      )}
+
       <div className="mt-2 flex gap-4 text-sm">
         <span>Owed <b>{l.owedWithBuffer != null ? formatCurrency(l.owedWithBuffer) : "—"}</b></span>
         <span>Zillow <b>{l.zillowValue != null ? formatCurrency(l.zillowValue) : "—"}</b></span>
