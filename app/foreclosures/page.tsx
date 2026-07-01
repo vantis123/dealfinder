@@ -38,6 +38,10 @@ interface Lead {
   complaintUrl?: string | null;
   valueUrl?: string | null;
   docketUrl?: string | null;
+  phones?: { phone: string; sources: string[] }[];
+  skiptraceName?: string | null;
+  filingDate?: string | null;
+  scannedAt?: string | null;
   knock?: { status?: string; note?: string };
 }
 
@@ -67,6 +71,7 @@ export default function ForeclosuresPage() {
   const [minSpread, setMinSpread] = useState(200000);
   const [view, setView] = useState<"knock" | "review" | "all">("knock");
   const [viewMode, setViewMode] = useState<"table" | "cards">("table");
+  const [sortBy, setSortBy] = useState<"spread" | "filed" | "found">("spread");
   const [q, setQ] = useState("");
   // scan state
   const [scanOpen, setScanOpen] = useState(false);
@@ -140,7 +145,11 @@ export default function ForeclosuresPage() {
     if (q && !(`${l.propertyAddress} ${l.defendant} ${l.plaintiff} ${l.caseNumber}`.toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
-  const sorted = [...filtered].sort((a, b) => (b.spread ?? -Infinity) - (a.spread ?? -Infinity));
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "filed") return (b.filingDate || "").localeCompare(a.filingDate || "");
+    if (sortBy === "found") return (b.scannedAt || "").localeCompare(a.scannedAt || "");
+    return (b.spread ?? -Infinity) - (a.spread ?? -Infinity);
+  });
 
   return (
     <div className="flex min-h-screen">
@@ -236,6 +245,12 @@ export default function ForeclosuresPage() {
             </label>
           )}
           <div className="ml-auto flex items-center gap-3">
+            <select value={sortBy} onChange={(e) => setSortBy(e.target.value as "spread" | "filed" | "found")}
+              className="rounded-lg border border-border bg-background px-2 py-1.5 text-sm" title="Sort by">
+              <option value="spread">Sort: Spread</option>
+              <option value="filed">Sort: Filing date (newest)</option>
+              <option value="found">Sort: Found date (newest)</option>
+            </select>
             <div className="flex rounded-lg border border-border overflow-hidden text-sm">
               <button onClick={() => setViewMode("table")} title="Table view"
                 className={cn("px-2.5 py-1.5 flex items-center gap-1", viewMode === "table" ? "bg-primary text-primary-foreground" : "hover:bg-accent")}>
@@ -341,13 +356,25 @@ function LeadRow({ l, onKnock }: { l: Lead; onKnock: (c: string, s: string) => v
             <MapPin className="h-3.5 w-3.5 mt-0.5 flex-shrink-0 opacity-50" />{l.propertyAddress}
           </a>
         ) : <span className="italic text-muted-foreground">address not pulled</span>}
-        <div className="text-[11px] text-muted-foreground mt-0.5">{l.caseNumber}{l.county ? ` · ${l.county}` : ""}</div>
+        <div className="text-[11px] text-muted-foreground mt-0.5">{l.caseNumber}{l.county ? ` · ${l.county}` : ""}{l.filingDate ? ` · 📅 filed ${l.filingDate}` : ""}</div>
       </td>
       <td className="px-3 py-2.5 text-right whitespace-nowrap">{l.owedWithBuffer != null ? formatCurrency(l.owedWithBuffer) : "—"}</td>
       <td className="px-3 py-2.5 text-right whitespace-nowrap">{l.zillowValue != null ? formatCurrency(l.zillowValue) : "—"}</td>
-      <td className="px-3 py-2.5 max-w-[190px]">
+      <td className="px-3 py-2.5 max-w-[210px]">
         <div className="truncate font-medium text-foreground">{l.defendant || "—"}</div>
         <div className="truncate text-[11px] text-muted-foreground">{l.plaintiff}</div>
+        {l.phones && l.phones.length > 0 && (
+          <div className="mt-1.5 flex flex-col gap-0.5">
+            {l.phones.slice(0, 3).map((ph, i) => (
+              <a key={i} href={`tel:${ph.phone.replace(/\D/g, "")}`} title={ph.sources.join(" + ")}
+                className="text-xs font-medium text-emerald-400 hover:underline">
+                📞 {ph.phone}{ph.sources.length > 1 ? " ✓✓" : ""}
+              </a>
+            ))}
+            {l.phones.length > 3 && <span className="text-[10px] text-muted-foreground">+{l.phones.length - 3} more</span>}
+            {l.skiptraceName && <span className="text-[10px] text-muted-foreground truncate">({l.skiptraceName})</span>}
+          </div>
+        )}
       </td>
       <td className="px-3 py-2.5 whitespace-nowrap text-sm">
         <div className="flex items-center gap-2">

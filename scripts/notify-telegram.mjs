@@ -61,6 +61,19 @@ function buildReport(leads, when) {
   return chunk(header, leads.map(leadBlock), footer);
 }
 
+// Build the receiver list: the primary TELEGRAM_BOT_TOKEN/CHAT_ID + any extras in TELEGRAM_RECEIVERS
+// (JSON array of {token, chat, label}). Each gets the full daily report. Deduped by token+chat.
+function buildReceivers(token, chat) {
+  const list = [];
+  if (token && chat) list.push({ token, chat, label: 'primary' });
+  try {
+    const extra = JSON.parse(env.TELEGRAM_RECEIVERS || '[]');
+    for (const r of (Array.isArray(extra) ? extra : [])) if (r.token && r.chat) list.push({ token: String(r.token), chat: String(r.chat), label: r.label || String(r.chat) });
+  } catch (e) { console.log('TELEGRAM_RECEIVERS is not valid JSON — ignoring'); }
+  const seen = new Set();
+  return list.filter(r => { const k = r.token + '|' + r.chat; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
 async function send(token, chat, text) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
@@ -91,8 +104,9 @@ export async function notifyTelegram({ token, chat, county, preview = false, mar
   preview = preview || process.env.PREVIEW === '1' || process.argv.includes('--preview');
   const doMark = mark && !process.argv.includes('--example'); // --example sends without stamping notified_at
   const heartbeat = (env.NOTIFY_HEARTBEAT ?? '1') !== '0';
+  const receivers = buildReceivers(token, chat);
 
-  if (!preview && (!token || !chat)) { console.log('telegram: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — skipping (run with --preview to SEE the report)'); return { sent: 0, skipped: true }; }
+  if (!preview && !receivers.length) { console.log('telegram: no receivers set (TELEGRAM_BOT_TOKEN/CHAT_ID or TELEGRAM_RECEIVERS) — run --preview to SEE the report'); return { sent: 0, skipped: true }; }
   const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
   let q = sb.from('foreclosure_leads').select('*').eq('flagged', true).is('notified_at', null)
@@ -123,7 +137,7 @@ export async function notifyTelegram({ token, chat, county, preview = false, mar
   if (!leads.length) {
     const msg = `✅ <b>DealFinder</b> ran ${niceDate(when)} — no new doors worth knocking today.`;
     if (preview) { console.log('\n----- PREVIEW (quiet day) -----\n' + toPlain(msg) + '\n'); return { preview: true, leads: 0 }; }
-    if (heartbeat) await send(token, chat, msg);
+    if (heartbeat) for (const r of receivers) await send(r.token, r.chat, msg);
     return { sent: 0 };
   }
 
@@ -132,16 +146,21 @@ export async function notifyTelegram({ token, chat, county, preview = false, mar
   if (preview) {
     console.log(`\n================= DAILY DOOR-KNOCK REPORT — PREVIEW${sample ? ' (sample: current top leads)' : ''} =================\n`);
     console.log(messages.map(toPlain).join('\n\n— — — — — (continues in next message) — — — — —\n\n'));
-    console.log(`\n================= end · ${leads.length} lead(s) · every link is tappable in Telegram =================\n`);
-    return { preview: true, leads: leads.length, sample };
+    console.log(`\n================= end · ${leads.length} lead(s) · sending to ${receivers.length} receiver(s) · links tappable in Telegram =================\n`);
+    return { preview: true, leads: leads.length, sample, receivers: receivers.length };
   }
 
-  let ok = true;
-  for (const m of messages) ok = (await send(token, chat, m)) && ok;
-  if (ok && doMark) {
+  let anyOk = false;
+  for (const r of receivers) {
+    let ok = true;
+    for (const m of messages) ok = (await send(r.token, r.chat, m)) && ok;
+    console.log(`  → ${r.label}: ${ok ? 'sent ' + leads.length : 'FAILED (recipient must DM the bot first)'}`);
+    if (ok) anyOk = true;
+  }
+  if (anyOk && doMark) {
     await sb.from('foreclosure_leads').update({ notified_at: new Date().toISOString() }).in('case_number', leads.map(l => l.case_number));
   }
-  return { sent: ok ? leads.length : 0, total: leads.length, marked: doMark };
+  return { sent: anyOk ? leads.length : 0, total: leads.length, receivers: receivers.length, marked: anyOk && doMark };
 }
 
 // Run directly?  (add --preview to print the report instead of sending it)

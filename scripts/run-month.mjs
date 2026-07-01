@@ -61,6 +61,8 @@ async function getToken(){ for(;;){ while(tokenBuf.length&&Date.now()-tokenBuf[0
 
 // ---- extraction (free) ----
 function addr(file){try{const t=execFileSync('pdftotext',[file,'-'],{maxBuffer:2e8}).toString().replace(/\s+/g,' ');const m=t.match(/located at:?\s*(\d+\s+[A-Za-z0-9 .]+?,\s*[A-Za-z .]+?,\s*FL\s*\d{5})/i)||t.match(/(\d{2,6}\s+[A-Z][A-Za-z0-9 .]+?,\s*[A-Za-z .]+?,\s*FL\s*\d{5})/);return m?m[1].trim().replace(/\s{2,}/g,' '):null;}catch(e){return null;}}
+// Court filing date from the complaint's "E-Filed MM/DD/YYYY" stamp (first page) → ISO YYYY-MM-DD.
+function filingDate(file){try{const t=execFileSync('pdftotext',['-l','1',file,'-'],{maxBuffer:5e7}).toString();const m=t.match(/E-?Filed:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i)||t.match(/\bFiled:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);return m?`${m[3]}-${String(+m[1]).padStart(2,'0')}-${String(+m[2]).padStart(2,'0')}`:null;}catch(e){return null;}}
 async function owedOCR(file){
   const tmp=`/tmp/ocr-${process.pid}-${ocrN++}`;
   try{
@@ -173,6 +175,7 @@ async function upsertLead(rec){
     zillow_value:rec.zillowValue??null, spread:rec.spread??null, flagged:rec.flagged??null,
     review_status:rec.reviewStatus||null, review_reason:rec.reviewReason||null,
     complaint_url:rec.complaintUrl||null, value_url:rec.valueUrl||null, docket_url:rec.docketUrl||null,
+    filing_date:rec.filingDate||null,
     scan_month:MONTH, scan_year:YEAR, updated_at:new Date().toISOString()
   },{onConflict:'case_number'}); }catch(e){ log('supabase upsert err',String(e.message).slice(0,40)); }
 }
@@ -198,6 +201,9 @@ for(let attempt=1; attempt<=6 && list.length===0; attempt++){
   finally{ if(sess) await sess.ctx.close().catch(()=>{}); }
 }
 const MAX=parseInt(process.env.MAX||'0',10); if(MAX) list=list.slice(0,MAX);
+// ONLY_CASES=<csv> → process only these case numbers (targeted doc backfill); skip the rest.
+const ONLY=(process.env.ONLY_CASES||'').split(',').map(s=>s.trim()).filter(Boolean);
+if(ONLY.length){ list=list.filter(x=>ONLY.includes(x.caseNumber)); log(`ONLY_CASES → ${list.length} target(s)`); }
 total=list.length; pushStatus(); log(`CA targets: ${total}`);
 
 // 2) per-case workers — each holds a persistent session and RE-SEARCHES before clicking each case
@@ -231,7 +237,7 @@ async function worker(slot){
         // the permanent URL. Fall back to the (expiring) county link only if the upload fails.
         const srcComplaint=info.complaint||null, srcValue=info.value||null;
         rec.complaintUrl=null; rec.valueUrl=null;
-        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
+        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp); rec.filingDate=filingDate(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
         if(srcValue){ const tmp=`/tmp/df-val-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcValue); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); const v=await owed(tmp); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; rec.valueUrl=await saveDocToStorage(sb,rec.caseNumber,'value',buf)||srcValue;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
       }catch(e){ rec.reviewReason='err:'+String(e.message).slice(0,24); }
       rec.complaintX=!rec.complaintUrl; rec.valueX=!rec.valueUrl;
@@ -252,9 +258,12 @@ fillTokens=false;
 // 3) Valuation — reliable Zillow at scale via Apify (local scraping gets IP-blocked after ~1 lookup).
 //    value-with-apify.mjs values every address, recomputes spread/worth-it, updates Supabase + the sheet.
 scrapeDone=true;
+if(process.env.SKIP_VALUATION==='1'){ log('SKIP_VALUATION=1 → skipping Apify (doc backfill only)'); }
+else{
 log('valuation pass (Apify Zillow)…');
 try{ execFileSync(process.execPath,[join(__dirname,'value-with-apify.mjs')],{stdio:'inherit',env:process.env}); }
 catch(e){ log('apify valuation step failed',String(e.message).slice(0,60)); }
+}
 
 // (door-knock CSV is written by value-with-apify.mjs from Supabase, with final Zillow values)
 // read the real worth-it count back from Supabase (the Apify subprocess set flagged there)

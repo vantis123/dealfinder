@@ -14,7 +14,9 @@
     "value": "node scripts/value-with-apify.mjs",
     "notify": "node scripts/notify-telegram.mjs",
     "daily": "node scripts/daily.mjs",
-    "postinstall": "node node_modules/camoufox-js/dist/__main__.js fetch || true"
+    "postinstall": "node node_modules/camoufox-js/dist/__main__.js fetch || true",
+    "skiptrace": "node scripts/skiptrace.mjs",
+    "skiptrace:run": "node scripts/skiptrace-run.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

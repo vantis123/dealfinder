@@ -15,6 +15,8 @@ function toLead(r: any) {
     flagged: r.flagged, reviewStatus: r.review_status, reviewReason: r.review_reason,
     complaintUrl: r.complaint_url, valueUrl: r.value_url, docketUrl: r.docket_url,
     complaintX: !r.complaint_url, valueX: !r.value_url, hasComplaint: !!r.complaint_url, hasValue: !!r.value_url,
+    phones: r.phones || [], skiptraceName: r.skiptrace_name || null,
+    filingDate: r.filing_date || null, scannedAt: r.scanned_at || null,
     knock: { status: r.knock_status || "new", note: r.knock_note || "" },
   };
 }

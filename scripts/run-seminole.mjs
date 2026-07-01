@@ -50,6 +50,8 @@ else { const days = parseInt(process.env.DAYS || '3', 10); const f = new Date(no
 // Address: try a STRICT "[Property Address]" anchor (clean Fannie/Freddie mortgages); validate it; and if
 // it's missing/garbled (template placeholders, missing street, or a servicer address), let Claude read it.
 function pdftext(file) { try { return execFileSync('pdftotext', [file, '-'], { maxBuffer: 2e8 }).toString(); } catch (e) { return ''; } }
+// Court filing date from the complaint's "E-Filed MM/DD/YYYY" stamp (first page) → ISO YYYY-MM-DD.
+function filingDate(file) { try { const t = execFileSync('pdftotext', ['-l', '1', file, '-'], { maxBuffer: 5e7 }).toString(); const m = t.match(/E-?Filed:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i) || t.match(/\bFiled:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i); return m ? `${m[3]}-${String(+m[1]).padStart(2, '0')}-${String(+m[2]).padStart(2, '0')}` : null; } catch (e) { return null; } }
 function isCleanAddr(s) { return !!s && /^\d/.test(s) && !/[\[\]{}]/.test(s) && /\bFL(?:ORIDA)?\b\s*\d{5}/i.test(s) && !/described|security instrument|lender|servic/i.test(s); }
 function addrAnchor(raw) {
   const lines = raw.split('\n').map(l => l.replace(/\s{2,}/g, ' ').trim());
@@ -127,6 +129,7 @@ async function upsertLead(rec) {
       total_owed: rec.totalOwed ?? null, owed_with_buffer: rec.owedWithBuffer ?? null,
       review_status: rec.reviewStatus || null, review_reason: rec.reviewReason || null,
       complaint_url: rec.complaintUrl || null, value_url: rec.valueUrl || null, docket_url: rec.docketUrl || null,
+      filing_date: rec.filingDate || null,
       scan_month: MONTH, scan_year: YEAR, updated_at: new Date().toISOString(),
     }, { onConflict: 'case_number' });
   } catch (e) { log('supabase upsert err', String(e.message).slice(0, 50)); }
@@ -214,7 +217,7 @@ try {
         // Download → extract → SAVE the PDF to Supabase Storage (the doc_view2 token is session-bound), store
         // the permanent URL; fall back to the viewer link only if the upload fails.
         const cmp = await fetchDoc(p, d.complaint);
-        if (cmp) { const f = join(tmpdir(), `sem-c-${c.num}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', cmp) || d.complaint; }
+        if (cmp) { const f = join(tmpdir(), `sem-c-${c.num}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', cmp) || d.complaint; }
         const val = await fetchDoc(p, d.value);
         if (val) { const f = join(tmpdir(), `sem-v-${c.num}.pdf`); writeFileSync(f, val); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.num, 'value', val) || d.value; }
         const o = (rec.principalDue || 0) + (rec.interestOwed || 0); rec.totalOwed = o || null; rec.owedWithBuffer = o ? o + 10000 : null;

@@ -25,6 +25,13 @@ try {
     scanned_at timestamptz default now(), updated_at timestamptz default now())`);
   // Backfill the column on tables created before the Telegram report existed.
   await c.query('alter table foreclosure_leads add column if not exists notified_at timestamptz');
+  // Skip-trace results (owner phone numbers from TruePeopleSearch / FastPeopleSearch).
+  await c.query('alter table foreclosure_leads add column if not exists phones jsonb');
+  await c.query('alter table foreclosure_leads add column if not exists skiptrace_name text');
+  await c.query('alter table foreclosure_leads add column if not exists skip_traced_at timestamptz');
+  // Court filing date (from the complaint's "E-Filed" stamp) — for sorting by how fresh the filing is.
+  await c.query('alter table foreclosure_leads add column if not exists filing_date date');
+  await c.query('create index if not exists idx_fl_filing on foreclosure_leads (filing_date desc)');
   // Performance indexes (identical to db/schema.sql so both setup paths produce the same database).
   await c.query('create index if not exists idx_fl_flagged  on foreclosure_leads (flagged)');
   await c.query('create index if not exists idx_fl_county   on foreclosure_leads (county)');
