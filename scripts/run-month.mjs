@@ -60,7 +60,24 @@ async function tokenFiller(){ while(fillTokens){ if(tokenBuf.length<PRESOLVE){ t
 async function getToken(){ for(;;){ while(tokenBuf.length&&Date.now()-tokenBuf[0].at>100000) tokenBuf.shift(); if(tokenBuf.length) return tokenBuf.shift().t; await sleep(400); } }
 
 // ---- extraction (free) ----
-function addr(file){try{const t=execFileSync('pdftotext',[file,'-'],{maxBuffer:2e8}).toString().replace(/\s+/g,' ');const m=t.match(/located at:?\s*(\d+\s+[A-Za-z0-9 .]+?,\s*[A-Za-z .]+?,\s*FL\s*\d{5})/i)||t.match(/(\d{2,6}\s+[A-Z][A-Za-z0-9 .]+?,\s*[A-Za-z .]+?,\s*FL\s*\d{5})/);return m?m[1].trim().replace(/\s{2,}/g,' '):null;}catch(e){return null;}}
+// county -> valid property ZIP prefixes. Guards against grabbing the foreclosure FIRM's
+// out-of-county address (e.g. a West Palm Beach law firm, 334xx) instead of the property.
+// Bug found 2026-07-02 (Orange case showed a $27M West Palm commercial building on Zillow).
+const COUNTY_ZIPS={ orange:['327','328','347'], seminole:['327'], volusia:['321','327','341'], brevard:['329','327','328'] };
+const PROP_ANCHOR=/(located at|commonly known as|property address|a\/k\/a|also known as|more particularly|real property|mortgaged (prem|property)|subject property)/i;
+function addr(file, county){
+  try{
+    const t=execFileSync('pdftotext',[file,'-'],{maxBuffer:2e8}).toString().replace(/\s+/g,' ');
+    const zips=COUNTY_ZIPS[(county||'').toLowerCase()]||['32','34']; // default: Central FL
+    const re=/(\d{2,6}\s+[A-Za-z0-9 .#-]+?,\s*[A-Za-z .]+?,\s*FL\s*(\d{5}))/gi;
+    const cands=[]; let m;
+    while((m=re.exec(t))) cands.push({addr:m[1].trim().replace(/\s{2,}/g,' '), zip:m[2], idx:m.index});
+    const inC=cands.filter(c=>zips.some(p=>c.zip.startsWith(p))); // drop out-of-county (the attorney address)
+    if(!inC.length) return null; // nothing in-county -> flagged manual_review, never a wrong address
+    for(const c of inC){ if(PROP_ANCHOR.test(t.slice(Math.max(0,c.idx-70),c.idx))) return c.addr; }
+    return inC[0].addr;
+  }catch(e){ return null; }
+}
 // Court filing date from the complaint's "E-Filed MM/DD/YYYY" stamp (first page) → ISO YYYY-MM-DD.
 function filingDate(file){try{const t=execFileSync('pdftotext',['-l','1',file,'-'],{maxBuffer:5e7}).toString();const m=t.match(/E-?Filed:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i)||t.match(/\bFiled:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);return m?`${m[3]}-${String(+m[1]).padStart(2,'0')}-${String(+m[2]).padStart(2,'0')}`:null;}catch(e){return null;}}
 async function owedOCR(file){
@@ -101,7 +118,7 @@ async function zillow(a){
 async function enrich(rec){
   const dir=`${OUT}/${rec.caseNumber}`,cF=`${dir}/Complaint.pdf`,vF=`${dir}/Value-of-Real-Property.pdf`;
   rec.complaintX=!existsSync(cF); rec.valueX=!existsSync(vF);
-  if(existsSync(cF)) rec.propertyAddress=addr(cF);
+  if(existsSync(cF)) rec.propertyAddress=addr(cF, env.COUNTY);
   if(existsSync(vF)){ const v=await owed(vF); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; }
   const o=(rec.principalDue||0)+(rec.interestOwed||0); rec.totalOwed=o||null; rec.owedWithBuffer=o?o+10000:null;
   // research each case fully, one by one: value + spread + verdict inline
@@ -237,7 +254,7 @@ async function worker(slot){
         // the permanent URL. Fall back to the (expiring) county link only if the upload fails.
         const srcComplaint=info.complaint||null, srcValue=info.value||null;
         rec.complaintUrl=null; rec.valueUrl=null;
-        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp); rec.filingDate=filingDate(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
+        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp, env.COUNTY); rec.filingDate=filingDate(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
         if(srcValue){ const tmp=`/tmp/df-val-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcValue); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); const v=await owed(tmp); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; rec.valueUrl=await saveDocToStorage(sb,rec.caseNumber,'value',buf)||srcValue;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
       }catch(e){ rec.reviewReason='err:'+String(e.message).slice(0,24); }
       rec.complaintX=!rec.complaintUrl; rec.valueX=!rec.valueUrl;
