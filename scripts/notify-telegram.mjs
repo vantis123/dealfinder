@@ -52,13 +52,23 @@ function leadBlock(r, i) {
   ].join('\n');
 }
 
-// Build the full report (header + numbered leads + total equity) → Telegram-sized message chunks.
+// Build the full report → Telegram-sized message chunks, SEPARATED BY COUNTY (each county gets its own
+// sub-header with its count + equity, then its leads).
 function buildReport(leads, when) {
   const n = leads.length;
   const header = `🚪 <b>${n} new door${n > 1 ? 's' : ''} to knock</b> — ${niceDate(when)}`;
   const total = leads.reduce((s, r) => s + (Number(r.spread) || 0), 0);
   const footer = `💰 Total new equity in play: <b>${fmtK(total)}</b>`;
-  return chunk(header, leads.map(leadBlock), footer);
+  const byCounty = {};
+  for (const r of leads) { const c = r.county || 'Orange'; (byCounty[c] = byCounty[c] || []).push(r); }
+  const blocks = [];
+  for (const county of Object.keys(byCounty).sort()) {
+    const cl = byCounty[county];
+    const eq = cl.reduce((s, r) => s + (Number(r.spread) || 0), 0);
+    blocks.push(`━━━ <b>${esc(county)} County</b> · ${cl.length} lead${cl.length > 1 ? 's' : ''} · ${fmtK(eq)} ━━━`);
+    cl.forEach((r, i) => blocks.push(leadBlock(r, i)));
+  }
+  return chunk(header, blocks, footer);
 }
 
 // Build the receiver list: the primary TELEGRAM_BOT_TOKEN/CHAT_ID + any extras in TELEGRAM_RECEIVERS

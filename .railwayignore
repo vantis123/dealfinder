@@ -1,0 +1,8 @@
+node_modules
+.next
+.git
+.rf-session
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+/tmp
+.DS_Store

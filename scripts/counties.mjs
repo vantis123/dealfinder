@@ -82,6 +82,51 @@ export const COUNTIES = {
     //   Then reuse the Orange back-half: pdftotext(address) + OCR/Claude(owed) → Zillow → spread.
     docFetch: { viewer: 'doc_view2.aspx?d=', service: 'civil_serv.asmx/getPDFImage', idVar: /var\s+id\s*=\s*'([^']+)'/, responseKey: 'd' },
   },
+  Lake: {
+    id: 'lake',
+    name: 'Lake County, FL',
+    // LIVE — validated 2026-07-03 end-to-end (Circuit Civil foreclosure search → docket → Complaint+Value
+    // PDFs → address(vision) + owed → bank-only filter). Scraper = scripts/run-lake.mjs (self-contained).
+    scraper: 'ready',
+    engine: 'showcase',   // equivant ShowCase SPA — search JSON has caseType+sid; docs via POST /sci/docket/document
+    caseSearchUrl: 'https://courtrecords.lakecountyclerk.org/',
+  },
+  Volusia: {
+    id: 'volusia',
+    name: 'Volusia County, FL',
+    // LIVE — validated 2026-07-03 (weekly foreclosure report → ccms.clerk.org docket → Complaint + Worksheet
+    // PDFs → address + owed). No captcha. Scraper = scripts/run-volusia.mjs (self-contained).
+    scraper: 'ready',
+    engine: 'ccms',       // app02.clerk.org weekly reports + ccms.clerk.org ASP.NET docket/docs
+    caseSearchUrl: 'https://ccms.clerk.org/',
+  },
+  Polk: {
+    id: 'polk',
+    name: 'Polk County, FL',
+    // LIVE — validated 2026-07-03 (PRO public access: reCAPTCHA via CapSolver → Circuit-Civil UCN+date search
+    // → docket → docs; address from Lis Pendens since the complaint is gated to pg1). Scraper = run-polk.mjs.
+    scraper: 'ready',
+    engine: 'pro',        // Polk Records Online (pro.polkcountyclerk.net/PRO); reCAPTCHA v2 (CapSolver)
+    caseSearchUrl: 'https://pro.polkcountyclerk.net/PRO',
+  },
+  Osceola: {
+    id: 'osceola',
+    name: 'Osceola County, FL',
+    // LIVE — validated 2026-07-03 (Pioneer Benchmark CSV export → docket → Complaint + Value PDFs →
+    // address(vision) + owed). No captcha. Scraper = scripts/run-osceola.mjs (self-contained).
+    scraper: 'ready',
+    engine: 'benchmark',  // Pioneer Technology Group Benchmark at courts.osceolaclerk.com/BenchmarkWeb
+    caseSearchUrl: 'https://courts.osceolaclerk.com/BenchmarkWeb',
+  },
+  Brevard: {
+    id: 'brevard',
+    name: 'Brevard County, FL',
+    // LIVE — validated 2026-07-03 (BECA case-type foreclosure search → docket → Complaint + Mortgage Claim
+    // Worksheet PDFs → address + owed). No captcha. Scraper = scripts/run-brevard.mjs (self-contained).
+    scraper: 'ready',
+    engine: 'beca',       // Brevard Electronic Court Application (ColdFusion); docs via get_document.cfm
+    caseSearchUrl: 'https://vmatrix1.brevardclerk.us/beca/beca_splash.cfm',
+  },
 };
 
 // Parse "Orange,Seminole" → ['Orange','Seminole']; default Orange.

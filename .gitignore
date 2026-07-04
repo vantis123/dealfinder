@@ -3,6 +3,15 @@ node_modules
 .env
 .env.local
 scan-status.json
+
+# scraped lead data (real owner PII) — never publish
+*.csv
 door-knock-leads.csv
+
+# live browser session/login state (per-county cookies) — never publish
+.rf-session/
+
+# build artifacts / logs / os cruft
+tsconfig.tsbuildinfo
 *.log
 .DS_Store

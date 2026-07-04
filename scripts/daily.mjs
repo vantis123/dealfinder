@@ -20,7 +20,7 @@ const env = loadEnv(ROOT);
 const log = (...a) => console.log(new Date().toISOString().slice(0, 19), ...a);
 
 // Each county runs its own scraper (Orange = myeclerk/reCAPTCHA, Seminole = ASP.NET/NoBot).
-const SCRIPTS = { Orange: 'run-month.mjs', Seminole: 'run-seminole.mjs' };
+const SCRIPTS = { Orange: 'run-month.mjs', Seminole: 'run-seminole.mjs', Lake: 'run-lake.mjs', Brevard: 'run-brevard.mjs', Volusia: 'run-volusia.mjs', Osceola: 'run-osceola.mjs', Polk: 'run-polk.mjs' };
 
 // Rolling "new foreclosures" window: last DAILY_DAYS days → today.
 const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -49,6 +49,19 @@ for (const county of ready) {
   }
 }
 
+// Auctions (RealForeclose) — stealth-walk each auction county's calendar, value via Zillow → auction_leads.
+const AUCTION_COUNTIES = (env.AUCTION_COUNTIES || 'Seminole,Orange,Volusia,Polk').split(',').map(s => s.trim()).filter(Boolean);
+const AUCTION_MONTHS = env.AUCTION_MONTHS_AHEAD || '6';
+for (const county of AUCTION_COUNTIES) {
+  log(`=== ${county} auctions (RealForeclose) ===`);
+  try {
+    execFileSync(process.execPath, [join(__dirname, 'run-realforeclose.mjs')], {
+      stdio: 'inherit',
+      env: { ...process.env, COUNTY: county.toLowerCase(), ENGINE: 'camoufox', HEADLESS: '1', MONTHS_AHEAD: AUCTION_MONTHS },
+    });
+  } catch (e) { log(`auction scan FAILED for ${county}:`, String(e.message).slice(0, 100)); }
+}
+
 // Combined daily summary across all counties → scan-status.json (drives the dashboard "daily update" popup).
 try {
   const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
@@ -63,7 +76,15 @@ try {
   log(`combined daily summary: ${knock} knock · ${review} review · ${notWorth} not-worth · $${Math.round(pipeline)} pipeline`);
 } catch (e) { log('combined summary failed:', String(e.message).slice(0, 80)); }
 
-log('=== combined Telegram report ===');
+// Auto-populate the CRM — refresh the unified `deals` spine (what the CRM reads) from both source tables.
+// (Phillip chose auto-flow: finds go all the way into the pipeline. Set AUTO_PROMOTE_CRM=0 to disable.)
+if (env.AUTO_PROMOTE_CRM !== '0') {
+  log('=== normalize → deals spine ===');
+  try { execFileSync(process.execPath, [join(__dirname, 'normalize-deals.mjs')], { stdio: 'inherit', env: process.env }); }
+  catch (e) { log('normalize failed:', String(e.message).slice(0, 100)); }
+}
+
+log('=== daily Telegram report (by county) ===');
 try { log('telegram:', JSON.stringify(await notifyTelegram())); }
 catch (e) { log('telegram failed:', String(e.message).slice(0, 100)); }
 

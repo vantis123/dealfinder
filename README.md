@@ -1,10 +1,17 @@
 # DealFinder — Foreclosure Door-Knock Lead Finder
 
-Finds Orange County, FL foreclosure filings worth door-knocking: it reads each case's
-**Complaint** (property address) and **Value of Real Property** (amount owed), pulls the
-**Zillow value**, computes the **equity spread** (value − owed), and flags anything with a
-spread ≥ **$200,000** as a "KNOCK" lead. Results show up in a live **CRM dashboard**, a
-**Google Sheet**, and a **door-knock CSV**.
+Finds Central Florida foreclosure deals worth door-knocking from **two sources**:
+
+- **Pre-foreclosure** — county clerk lis-pendens filings (early; door-knock the owner). Live in
+  all **7 Greater Central FL counties**: Orange, Seminole, Lake, Polk, Volusia, Brevard, Osceola.
+- **Auctions** — RealForeclose scheduled sales (urgent; clock ticking). Live in **Seminole,
+  Orange, Volusia, Polk**.
+
+For each case it pulls the **property address** and **amount owed** straight from the county
+paperwork (Complaint / Final Judgment / Value sheet), gets the **Zillow value**, computes the
+**equity spread** (value − owed), and flags the worth-it ones. Everything lands in a live **CRM
+pipeline** (Foreclosures, Auctions, and a Kanban board with per-county filters + door-knock
+routing), plus an optional **Google Sheet** and **CSV**.
 
 This is a **self-contained** copy — you don't need any other repo. Follow the steps below on
 any Mac or Linux machine.
@@ -100,14 +107,28 @@ configured), and `door-knock-leads.csv`. A full month is ~50–90 minutes.
 ## Files
 
 ```
-scripts/run-month.mjs        the scanner (scrape clerk → docs → address/owed)
-scripts/value-with-apify.mjs Zillow valuation (Apify) → spread/worth-it → sheet + CSV
-scripts/db-setup.mjs         creates the Supabase table
-app/                         the Next.js CRM dashboard
+scripts/daily.mjs            the daily cron — runs every county (pre-foreclosure + auction) + Telegram report
+scripts/run-month.mjs        Orange pre-foreclosure (myeclerk / reCAPTCHA)
+scripts/run-seminole.mjs     Seminole pre-foreclosure (CiviTek / NoBot)
+scripts/run-lake.mjs         Lake pre-foreclosure (equivant ShowCase)
+scripts/run-brevard.mjs      Brevard pre-foreclosure (BECA / ColdFusion)
+scripts/run-volusia.mjs      Volusia pre-foreclosure (weekly report + ccms)
+scripts/run-osceola.mjs      Osceola pre-foreclosure (Pioneer Benchmark)
+scripts/run-polk.mjs         Polk pre-foreclosure (PRO / reCAPTCHA)
+scripts/run-realforeclose.mjs auction scanner — Seminole, Orange, Volusia, Polk
+scripts/clerk-enrich.mjs     pulls the auction Final Judgment / Value Sheet PDF
+scripts/normalize-deals.mjs  rebuilds the unified CRM `deals` spine from both sources
+scripts/notify-telegram.mjs  the daily report, grouped by county
+scripts/value-with-apify.mjs Zillow valuation (Apify) → spread/worth-it
+scripts/db-setup.mjs         creates the Supabase tables
+app/                         the Next.js CRM (Foreclosures, Auctions, Pipeline board)
+lib/counties.ts              canonical county coverage the UI dropdowns read from
 .env.example                 copy to .env and fill in keys
-setup.sh                     one-time installer
-scan.sh                      "Refresh Leads" launcher
+setup.sh / scan.sh           one-time installer / scan launcher
 ```
+
+> **Node version:** the dashboard runs on Node 18+, but the **scrapers need Node 24** (the
+> Camoufox stealth browser requires it). If a scan errors on startup, check `node --version`.
 
 ## Google Sheet sync (optional)
 Set `SHEET_WEBHOOK_URL` in `.env` to an n8n (or Apps Script) webhook that appends a row per

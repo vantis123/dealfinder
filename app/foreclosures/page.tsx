@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Header } from "@/components/layout/header";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, cn } from "@/lib/utils";
+import { PREFORECLOSURE_COUNTIES, countyOptions } from "@/lib/counties";
 import { MapPin, FileText, FileX2, ExternalLink, Calendar, Play, Loader2, Table2, LayoutGrid } from "lucide-react";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -73,9 +74,13 @@ export default function ForeclosuresPage() {
   const [viewMode, setViewMode] = useState<"table" | "cards">("table");
   const [sortBy, setSortBy] = useState<"spread" | "filed" | "found">("spread");
   const [q, setQ] = useState("");
+  // county hide/unhide chips (independent of the CRM pipeline's own hide state)
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  useEffect(() => { try { setHidden(new Set(JSON.parse(localStorage.getItem("df_hidden_fc_counties") || "[]"))); } catch { /* */ } }, []);
+  const toggleCounty = (c: string) => setHidden((prev) => { const n = new Set(prev); n.has(c) ? n.delete(c) : n.add(c); try { localStorage.setItem("df_hidden_fc_counties", JSON.stringify([...n])); } catch { /* */ } return n; });
   // scan state
   const [scanOpen, setScanOpen] = useState(false);
-  const [scanCounty, setScanCounty] = useState<"Orange" | "Seminole">("Orange");
+  const [scanCounty, setScanCounty] = useState<string>("Orange");
   const [scanFrom, setScanFrom] = useState(MONTH_START);
   const [scanTo, setScanTo] = useState(TODAY_ISO);
   const [summary, setSummary] = useState<ScanSummary | null>(null); // scan / daily-update overlay
@@ -138,7 +143,9 @@ export default function ForeclosuresPage() {
     });
   }
 
+  const counties = useMemo(() => countyOptions(leads.map((l) => l.county)), [leads]);
   const filtered = leads.filter((l) => {
+    if (hidden.has(l.county || "")) return false;
     if (view === "knock" && !l.flagged) return false;
     if (view === "review" && l.reviewStatus !== "manual_review") return false;
     if (view === "knock" && (l.spread || 0) < minSpread) return false;
@@ -191,10 +198,9 @@ export default function ForeclosuresPage() {
               <div className="flex flex-wrap items-center gap-3 text-sm">
                 <Calendar className="h-4 w-4 text-muted-foreground" />
                 <span className="text-muted-foreground">County</span>
-                <select value={scanCounty} onChange={(e) => setScanCounty(e.target.value as "Orange" | "Seminole")}
+                <select value={scanCounty} onChange={(e) => setScanCounty(e.target.value)}
                   className="rounded-lg border border-border bg-background px-2 py-1.5 font-medium">
-                  <option value="Orange">Orange</option>
-                  <option value="Seminole">Seminole</option>
+                  {PREFORECLOSURE_COUNTIES.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
                 <span className="text-muted-foreground">from</span>
                 <input type="date" value={scanFrom} max={scanTo} onChange={(e) => setScanFrom(e.target.value)}
@@ -233,6 +239,16 @@ export default function ForeclosuresPage() {
               <button key={k} onClick={() => setView(k)}
                 className={cn("px-3 py-1.5", view === k ? "bg-primary text-primary-foreground" : "hover:bg-accent")}>
                 {lbl}
+              </button>
+            ))}
+          </div>
+          <div className="mx-1 h-5 w-px bg-border" />
+          <div className="flex flex-wrap items-center gap-1" title="Click a county to hide/show it">
+            {counties.filter((c) => c !== "All").map((c) => (
+              <button key={c} onClick={() => toggleCounty(c)}
+                className={cn("rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
+                  hidden.has(c) ? "bg-accent/40 text-muted-foreground line-through" : "bg-primary/10 text-primary hover:bg-primary/20")}>
+                {c}
               </button>
             ))}
           </div>
