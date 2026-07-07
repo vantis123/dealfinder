@@ -11,10 +11,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const env = loadEnv(ROOT); // .env locally, process.env on Railway/containers
 const APIFY = env.APIFY_API_TOKEN;
 const SHEET = env.SHEET_WEBHOOK_URL || '';
+const RUN_START_MS = Date.now(); // captured before any update — used to sync ONLY rows touched this run
 const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-const syncToSheet = async r => { if (!SHEET) return; try { await fetch(SHEET, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caseNumber: r.case_number, plaintiff: r.plaintiff, defendant: r.defendant, type: r.type, address: r.property_address || '', owed: r.owed_with_buffer || '', zillow: r.zillow_value || '', spread: r.spread || '', knock: r.flagged ? 'KNOCK' : (r.review_status === 'manual_review' ? 'REVIEW' : ''), complaint: r.complaint_url ? 'link' : 'X', value: r.value_url ? 'link' : 'X', status: r.review_status, county: r.county || 'Orange' }) }); } catch (e) {} };
+const toSheetRow = r => ({ caseNumber: r.case_number, plaintiff: r.plaintiff, defendant: r.defendant, type: r.type, address: r.property_address || '', owed: r.owed_with_buffer || '', zillow: r.zillow_value || '', spread: r.spread || '', knock: r.flagged ? 'KNOCK' : (r.review_status === 'manual_review' ? 'REVIEW' : ''), complaint: r.complaint_url ? 'link' : 'X', value: r.value_url ? 'link' : 'X', status: r.review_status, county: r.county || 'Orange' });
 
 if (!APIFY) { console.log('APIFY_API_TOKEN missing in .env — skipping valuation'); process.exit(0); }
 
@@ -61,7 +62,16 @@ if (rows.length) {
 
 // pull the FULL final rows once, then sync the sheet from complete data (no partial overwrites)
 const { data: all } = await sb.from('foreclosure_leads').select('*').order('flagged', { ascending: false, nullsFirst: false }).order('spread', { ascending: false, nullsFirst: false });
-if (SHEET) { console.log(`syncing ${(all || []).length} rows to the sheet…`); for (const r of all || []) { await syncToSheet(r); await sleep(300); } }
+// BATCHED sheet sync — one POST of {leads:[...]} = one n8n execution (was one-per-row = hundreds).
+// Default: only rows touched THIS run (new/re-valued). SHEET_FULL=1 pushes the whole table (first-time backfill).
+if (SHEET) {
+  const full = process.env.SHEET_FULL === '1';
+  const syncRows = full ? (all || []) : (all || []).filter(r => r.updated_at && new Date(r.updated_at).getTime() >= RUN_START_MS - 1000);
+  if (syncRows.length) {
+    try { await fetch(SHEET, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ leads: syncRows.map(toSheetRow) }) }); console.log(`synced ${syncRows.length} rows to the sheet in 1 batch${full ? ' (FULL)' : ''}`); }
+    catch (e) { console.log('sheet batch sync failed:', String(e.message).slice(0, 60)); }
+  } else console.log('sheet: no changed rows to sync this run');
+}
 const esc = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
 const head = ['Case Number', 'Plaintiff (Bank)', 'Defendant (Owner)', 'Filing Type', 'Property Address', 'Owed +$10K', 'Zillow Value', 'Spread', 'Knock?', 'Complaint Link', 'Value Link', 'Docket Link', 'Status'];
 const lines = [head.map(esc).join(',')];

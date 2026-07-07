@@ -175,9 +175,12 @@ const hoa=/homeowner|condominium|\bcondo\b|community (owners|assoc)|master assoc
 const recs=[]; const recent=[]; let nKnock=0,nReview=0,done=0,total=0;
 const setStatus=o=>{try{writeFileSync(STATUS,JSON.stringify({county:env.COUNTY||'Orange',month:MONTH,year:YEAR,from:DATE_FROM,to:DATE_TO,...o},null,2));}catch(e){}};
 const pushStatus=(extra={})=>setStatus({running:true,done,total,knock:nKnock,review:nReview,recent:recent.slice(0,12),tokensIn:tokIn,tokensOut:tokOut,aiCostUsd:Number(cost().toFixed(4)),mode:USE_AI?'ai':'ocr',workers:CONCURRENCY,...extra});
-// live Google Sheet sync — POST each finished case to an Apps Script webhook (set SHEET_WEBHOOK_URL in .env.local)
+// live Google Sheet sync — BATCHED: collect finished cases, POST once at the end as {leads:[...]}
+// (1 n8n execution per run instead of one-per-case). n8n webhook explodes the array back into rows.
 const SHEET_WEBHOOK=env.SHEET_WEBHOOK_URL||'';
-async function syncToSheet(rec){ if(!SHEET_WEBHOOK)return; try{ await fetch(SHEET_WEBHOOK,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({caseNumber:rec.caseNumber,plaintiff:rec.plaintiff,defendant:rec.defendant,type:rec.type,address:rec.propertyAddress||'',owed:rec.owedWithBuffer||'',zillow:rec.zillowValue||'',spread:rec.spread||'',knock:rec.flagged?'KNOCK':(rec.reviewStatus==='manual_review'?'REVIEW':''),complaint:rec.complaintX?'X':'link',value:rec.valueX?'X':'link',status:rec.reviewStatus,county:env.COUNTY||'Orange'})}); }catch(e){} }
+const sheetBatch=[];
+function queueForSheet(rec){ if(!SHEET_WEBHOOK)return; sheetBatch.push({caseNumber:rec.caseNumber,plaintiff:rec.plaintiff,defendant:rec.defendant,type:rec.type,address:rec.propertyAddress||'',owed:rec.owedWithBuffer||'',zillow:rec.zillowValue||'',spread:rec.spread||'',knock:rec.flagged?'KNOCK':(rec.reviewStatus==='manual_review'?'REVIEW':''),complaint:rec.complaintX?'X':'link',value:rec.valueX?'X':'link',status:rec.reviewStatus,county:env.COUNTY||'Orange'}); }
+async function flushSheet(){ if(!SHEET_WEBHOOK||!sheetBatch.length)return; try{ await fetch(SHEET_WEBHOOK,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({leads:sheetBatch})}); log(`sheet: sent ${sheetBatch.length} rows in 1 batch`); }catch(e){ log('sheet batch err',String(e.message).slice(0,40)); } }
 setStatus({running:true,done:0,total:0,startedAt:new Date().toISOString(),workers:CONCURRENCY,mode:USE_AI?'ai':'ocr'});
 
 // ---- Supabase: the ONLY persistence (no local PDFs/JSON). Stores data + the document links. ----
@@ -263,7 +266,7 @@ async function worker(slot){
       recs.push(rec); await upsertLead(rec); // Supabase only — no local files
       if(rec.reviewStatus==='manual_review')nReview++;
       recent.unshift({caseNumber:rec.caseNumber,address:rec.propertyAddress||null,spread:null,flagged:false,x:!!(rec.complaintX||rec.valueX)}); if(recent.length>12)recent.pop();
-      done++; pushStatus(); await syncToSheet(rec);
+      done++; pushStatus(); queueForSheet(rec);
       log(`  ${done}/${total} ${rec.caseNumber} | ${rec.propertyAddress||'?'} | owed ${rec.owedWithBuffer||'?'} | ${rec.reviewStatus}`);
     }
   }catch(e){ log(`worker ${slot} died`,String(e.message).slice(0,40)); }
@@ -271,6 +274,7 @@ async function worker(slot){
 }
 await Promise.all(Array.from({length:CONCURRENCY},(_,i)=>worker(i)));
 fillTokens=false;
+await flushSheet(); // one batched POST of this run's scraped cases (valuation pass syncs the Zillow values after)
 
 // 3) Valuation — reliable Zillow at scale via Apify (local scraping gets IP-blocked after ~1 lookup).
 //    value-with-apify.mjs values every address, recomputes spread/worth-it, updates Supabase + the sheet.
