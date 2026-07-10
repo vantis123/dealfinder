@@ -30,16 +30,28 @@ console.log(`valuing ${rows.length} addresses via Apify…`);
 
 if (rows.length) {
   const addresses = rows.map(r => r.property_address);
-  const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${APIFY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json());
-  const runId = start.data?.id, datasetId = start.data?.defaultDatasetId;
+  // Start the actor with a few retries — a transient rate-limit (429, common when two daily runs overlap)
+  // used to return an error body, leaving datasetId undefined and crashing the loop below ("items is not iterable").
+  let runId, datasetId;
+  for (let attempt = 0; attempt < 3 && !datasetId; attempt++) {
+    if (attempt) await sleep(15000);
+    const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${APIFY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json()).catch(e => ({ error: { message: String(e.message) } }));
+    runId = start.data?.id; datasetId = start.data?.defaultDatasetId;
+    if (!datasetId) console.log(`  apify start failed (attempt ${attempt + 1}/3):`, JSON.stringify(start.error || start).slice(0, 120));
+  }
+  if (!datasetId) { console.log('apify start never succeeded — skipping valuation this run (leads kept, will re-value next run)'); }
+  else {
   let status = 'RUNNING';
   for (let i = 0; i < 180 && (status === 'RUNNING' || status === 'READY'); i++) {
     await sleep(5000);
-    status = (await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY}`).then(r => r.json())).data?.status;
+    status = (await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY}`).then(r => r.json()).catch(() => ({}))).data?.status;
     if (i % 4 === 0) console.log('  apify:', status);
     if (['SUCCEEDED', 'FAILED', 'ABORTED'].includes(status)) break;
   }
-  const items = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY}&fields=addressOrUrlFromInput,streetAddress,zestimate,price,taxAssessedValue`).then(r => r.json());
+  const rawItems = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY}&fields=addressOrUrlFromInput,streetAddress,zestimate,price,taxAssessedValue`).then(r => r.json()).catch(() => []);
+  // Apify returns an ARRAY on success but an {error:{...}} OBJECT on failure — guard so a bad response never crashes the run.
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  if (!Array.isArray(rawItems)) console.log('apify items fetch returned non-array:', JSON.stringify(rawItems).slice(0, 120));
   const byInput = new Map(), byStreet = new Map();
   for (const it of items) { const v = it.zestimate || it.price || it.taxAssessedValue || null; if (it.addressOrUrlFromInput) byInput.set(norm(it.addressOrUrlFromInput), v); if (it.streetAddress) byStreet.set(norm(it.streetAddress), v); }
   console.log(`got ${items.length} Zillow results`);
@@ -58,6 +70,7 @@ if (rows.length) {
     await sb.from('foreclosure_leads').update(patch).eq('case_number', r.case_number);
   }
   console.log(`valued ${valued}/${rows.length} | WORTH-IT (spread ≥ $200k): ${worth}`);
+  }
 }
 
 // pull the FULL final rows once, then sync the sheet from complete data (no partial overwrites)
