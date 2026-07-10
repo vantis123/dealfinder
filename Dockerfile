@@ -15,11 +15,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install ALL deps (build needs dev deps). postinstall fetches the Camoufox browser binary.
+# Install ALL deps (build needs dev deps). postinstall ALSO tries to fetch Camoufox but with `|| true`,
+# which silently shipped images with no browser (-> runtime CamoufoxNotInstalled, all auction scans failed).
 COPY package*.json ./
 RUN npm ci
 # Firefox/Camoufox system libraries (gtk, x11, dbus, etc.)
 RUN npx playwright install-deps firefox || true
+# Bake the Camoufox stealth browser into a STABLE image path (not ephemeral $HOME) and FAIL the build if
+# the download breaks — so we never again ship an image whose auction scraper can't launch. The runtime
+# reads the same CAMOUFOX_INSTALL_DIR env, so scripts/run-realforeclose.mjs finds it.
+ENV CAMOUFOX_INSTALL_DIR=/opt/camoufox
+RUN node node_modules/camoufox-js/dist/__main__.js fetch \
+  && test -d /opt/camoufox && ls -la /opt/camoufox
 
 COPY . .
 RUN npm run build
