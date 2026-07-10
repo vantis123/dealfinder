@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
 import { join } from "path";
 
 // scanner + status live at the repo root (this file is app/api/foreclosures/scan/route.ts → 4 levels up)
@@ -11,8 +11,20 @@ const SCRIPTS: Record<string, string> = {
   Seminole: join(ROOT, "scripts", "run-seminole.mjs"),
 };
 
+// Heartbeat window: run-month.mjs rewrites scan-status.json after every case
+// (pushStatus()), so a live scan keeps the file "fresh". If the worker hard-crashes
+// (OOM/kill), it never writes running:false — without a heartbeat check the scan
+// button stays dead for up to 12h. If the file hasn't been touched in this long,
+// treat the lock as stale and allow a new scan.
+const STALE_LOCK_MS = 30 * 60 * 1000; // 30 min
+
 function readStatus(): any {
   try { return JSON.parse(readFileSync(STATUS, "utf8")); } catch { return { running: false }; }
+}
+
+// Age (ms) of the status file since last write, or Infinity if unavailable.
+function statusFileAgeMs(): number {
+  try { return Date.now() - statSync(STATUS).mtimeMs; } catch { return Infinity; }
 }
 
 export async function GET() {
@@ -23,7 +35,11 @@ export async function GET() {
 export async function POST(req: Request) {
   const { month, year, county, from, to } = await req.json().catch(() => ({}));
   const cur = readStatus();
-  if (cur.running && cur.startedAt && Date.now() - new Date(cur.startedAt).getTime() < 12 * 3600 * 1000) {
+  // Locked only if flagged running AND started within 12h AND the heartbeat is fresh.
+  // A stale heartbeat means the worker died without clearing the flag — allow a new scan.
+  const withinMaxRun = cur.startedAt && Date.now() - new Date(cur.startedAt).getTime() < 12 * 3600 * 1000;
+  const heartbeatFresh = statusFileAgeMs() < STALE_LOCK_MS;
+  if (cur.running && withinMaxRun && heartbeatFresh) {
     return NextResponse.json({ ok: false, error: "A scan is already running", status: cur }, { status: 409 });
   }
   const cty = county === "Seminole" ? "Seminole" : "Orange";

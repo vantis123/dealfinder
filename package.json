@@ -16,7 +16,8 @@
     "daily": "node scripts/daily.mjs",
     "postinstall": "node node_modules/camoufox-js/dist/__main__.js fetch || true",
     "skiptrace": "node scripts/skiptrace.mjs",
-    "skiptrace:run": "node scripts/skiptrace-run.mjs"
+    "skiptrace:run": "node scripts/skiptrace-run.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
