@@ -84,7 +84,7 @@ export default function AuctionsPage() {
   return (
     <div className="flex min-h-screen">
       <Sidebar />
-      <main className="flex-1 ml-64">
+      <main className="flex-1 lg:ml-64">
         <Header title="Auctions" totalProperties={stats.total} hotDeals={stats.knock} />
 
         <div className="p-6 space-y-6">

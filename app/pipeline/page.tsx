@@ -146,7 +146,7 @@ export default function CrmPage() {
   return (
     <div className="flex min-h-screen">
       <Sidebar />
-      <main className="flex-1 ml-64">
+      <main className="flex-1 lg:ml-64">
         <Header title="CRM · V2" totalProperties={stats.total} hotDeals={stats.flagged} onRefresh={() => load(source)} isRefreshing={loading} />
 
         <div className="p-4 space-y-4">

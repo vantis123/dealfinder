@@ -64,7 +64,7 @@ export default function NewDealsPage() {
   return (
     <div className="flex min-h-screen">
       <Sidebar />
-      <main className="flex-1 ml-64">
+      <main className="flex-1 lg:ml-64">
         <Header title="New Deals" totalProperties={deals.length} hotDeals={deals.length} />
 
         <div className="p-6 space-y-6">

@@ -107,7 +107,7 @@ export default function JoinPage() {
   return (
     <div className="flex min-h-screen">
       <Sidebar />
-      <main className="flex-1 ml-64">
+      <main className="flex-1 lg:ml-64">
         <Header title="Add a Scanner" />
 
         <div className="mx-auto max-w-3xl p-6 space-y-6">

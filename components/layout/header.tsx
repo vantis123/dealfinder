@@ -10,7 +10,7 @@ export function Header({
   isRefreshing?: boolean;
 }) {
   return (
-    <header className="flex items-center justify-between px-6 py-4 border-b border-border bg-card/30">
+    <header className="flex items-center justify-between pl-16 pr-4 py-4 lg:px-6 border-b border-border bg-card/30">
       <div>
         <h1 className="text-xl font-bold">{title}</h1>
         <p className="text-xs text-muted-foreground">
