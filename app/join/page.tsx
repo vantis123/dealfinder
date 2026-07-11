@@ -133,11 +133,11 @@ export default function JoinPage() {
           </div>
 
           {/* Requirement */}
-          <Card className="flex items-center gap-3 border-amber-500/30 bg-amber-500/5 p-4">
-            <Cpu className="h-5 w-5 flex-shrink-0 text-amber-400" />
+          <Card className="flex items-center gap-3 border-primary/30 bg-primary/5 p-4">
+            <Cpu className="h-5 w-5 flex-shrink-0 text-primary" />
             <p className="text-sm">
-              <b>You need an Apple-Silicon Mac</b> (M1/M2/M3/M4). The stealth browser has no Windows or
-              Intel-Mac build right now — an M-series Mac is required for it to run.
+              Runs on an <b>Apple-Silicon Mac</b> (M1–M4) or a <b>Windows 10/11 PC</b> (64-bit). Just leave
+              the computer on. <span className="text-muted-foreground">(Intel Macs and Linux aren&apos;t supported by the stealth browser.)</span>
             </p>
           </Card>
 

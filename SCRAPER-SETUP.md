@@ -4,8 +4,10 @@ You're going to run the part of DealFinder that **finds the deals** — it check
 foreclosure records every morning and adds new leads to the shared dashboard. It runs by itself
 as long as your computer is on.
 
-> **You need an Apple-Silicon Mac** (M1/M2/M3/M4). The stealth browser it uses doesn't have a
-> Windows or Intel-Mac build right now. If that's a problem, tell the person who sent you this.
+> **Works on an Apple-Silicon Mac (M1–M4) or a 64-bit Windows 10/11 PC.** (Intel Macs and Linux aren't
+> supported by the stealth browser.) On **Windows**, run the commands below in **Git Bash** (installed
+> with [Git for Windows](https://git-scm.com/download/win)) — same steps. Windows support is newer; if
+> anything sticks, send the last lines of `daily-cron.log` to whoever set you up.
 
 ---
 
