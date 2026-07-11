@@ -15,3 +15,7 @@ door-knock-leads.csv
 tsconfig.tsbuildinfo
 *.log
 .DS_Store
+
+# internal ops/debug scripts (not product)
+scripts/railway-recon.mjs
+scripts/railway-buildlog.mjs

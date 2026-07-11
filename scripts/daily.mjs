@@ -13,6 +13,7 @@ import { createClient } from '@supabase/supabase-js';
 import { loadEnv } from './_env.mjs';
 import { notifyTelegram } from './notify-telegram.mjs';
 import { COUNTIES, parseCounties, readyCounties } from './counties.mjs';
+import { ensureCamoufox } from './ensure-camoufox.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -35,6 +36,8 @@ if (skipped.length) log(`skipping (scraper pending): ${skipped.join(', ')}`);
 if (!ready.length) { log('no ready counties to scan — set ENABLED_COUNTIES'); process.exit(0); }
 
 const runStart = new Date().toISOString();
+// Ensure the stealth browser is installed before any county runs (installs once, persists on the volume).
+try { log(`camoufox: ${await ensureCamoufox()}`); } catch (e) { log('camoufox ensure FAILED:', String(e.message).slice(0, 120)); }
 log(`daily scan starting for: ${ready.join(', ')} | new foreclosures ${DATE_FROM} → ${DATE_TO}`);
 for (const county of ready) {
   log(`=== ${county} (${COUNTIES[county].name}) ===`);

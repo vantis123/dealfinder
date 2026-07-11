@@ -1,14 +1,23 @@
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
-import { readFileSync, statSync } from "fs";
+import { readFileSync, statSync, openSync } from "fs";
 import { join } from "path";
 
 // scanner + status live at the repo root (this file is app/api/foreclosures/scan/route.ts → 4 levels up)
 const ROOT = join(process.cwd());
 const STATUS = join(ROOT, "scan-status.json");
+// Worker output goes here so a failed scan is DIAGNOSABLE (the scrapers otherwise run detached and
+// their crash/stack is lost). Read the tail via GET /api/foreclosures/scan?log=1.
+const WORKER_LOG = "/tmp/scan-worker.log";
+// Every live pre-foreclosure county → its scraper. Keep in sync with scripts/daily.mjs SCRIPTS.
 const SCRIPTS: Record<string, string> = {
   Orange: join(ROOT, "scripts", "run-month.mjs"),
   Seminole: join(ROOT, "scripts", "run-seminole.mjs"),
+  Lake: join(ROOT, "scripts", "run-lake.mjs"),
+  Brevard: join(ROOT, "scripts", "run-brevard.mjs"),
+  Volusia: join(ROOT, "scripts", "run-volusia.mjs"),
+  Osceola: join(ROOT, "scripts", "run-osceola.mjs"),
+  Polk: join(ROOT, "scripts", "run-polk.mjs"),
 };
 
 // Heartbeat window: run-month.mjs rewrites scan-status.json after every case
@@ -27,7 +36,14 @@ function statusFileAgeMs(): number {
   try { return Date.now() - statSync(STATUS).mtimeMs; } catch { return Infinity; }
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  // ?log=1 → tail of the worker log, so a failing county scan can be diagnosed remotely.
+  if (new URL(req.url).searchParams.get("log")) {
+    try {
+      const txt = readFileSync(WORKER_LOG, "utf8");
+      return new NextResponse(txt.slice(-6000), { headers: { "Content-Type": "text/plain" } });
+    } catch { return new NextResponse("(no worker log yet)", { headers: { "Content-Type": "text/plain" } }); }
+  }
   return NextResponse.json(readStatus());
 }
 
@@ -42,7 +58,8 @@ export async function POST(req: Request) {
   if (cur.running && withinMaxRun && heartbeatFresh) {
     return NextResponse.json({ ok: false, error: "A scan is already running", status: cur }, { status: 409 });
   }
-  const cty = county === "Seminole" ? "Seminole" : "Orange";
+  // Any covered county with a wired scraper; unknown → Orange (safe default).
+  const cty = SCRIPTS[county] ? county : "Orange";
   const script = SCRIPTS[cty];
 
   // date range wins; otherwise fall back to month/year. Tag scan_month/year from the "to" date.
@@ -58,7 +75,13 @@ export async function POST(req: Request) {
     env.SCAN_MONTH = String(m); env.SCAN_YEAR = String(y);
   }
 
-  const child = spawn("node", [script], { cwd: ROOT, env, detached: true, stdio: "ignore" });
+  // Capture worker output to WORKER_LOG (truncate per run) so a crash is diagnosable via ?log=1.
+  let outFd: number;
+  try { outFd = openSync(WORKER_LOG, "w"); } catch { outFd = 0; }
+  const stdio = outFd ? ["ignore", outFd, outFd] as const : "ignore";
+  // Ensure the Camoufox browser is installed (runtime, authenticated) BEFORE the scraper runs.
+  const ensure = join(ROOT, "scripts", "ensure-camoufox.mjs");
+  const child = spawn("sh", ["-c", `node '${ensure}' && node '${script}'`], { cwd: ROOT, env, detached: true, stdio });
   child.unref();
   return NextResponse.json({ ok: true, started: true, county: cty, from: env.DATE_FROM, to: env.DATE_TO });
 }
