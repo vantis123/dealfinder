@@ -5,7 +5,8 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { Header } from "@/components/layout/header";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Laptop, Download, Terminal, KeyRound, Clock, Copy, Check, ExternalLink, Cpu } from "lucide-react";
+import { Laptop, Download, Terminal, KeyRound, Clock, Copy, Check, ExternalLink, Cpu, MapPin, Send } from "lucide-react";
+import { COVERED_COUNTIES } from "@/lib/counties";
 
 const REPO = "https://github.com/vantis123/dealfinder";
 const ZIP = "https://github.com/vantis123/dealfinder/archive/refs/heads/main.zip";
@@ -39,6 +40,69 @@ function Step({ n, icon: Icon, title, children }: { n: number; icon: any; title:
   );
 }
 
+function RequestCounty() {
+  const [state, setState] = useState("FL");
+  const [county, setCounty] = useState("");
+  const [contact, setContact] = useState("");
+  const [notes, setNotes] = useState("");
+  const [status, setStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
+  const [msg, setMsg] = useState("");
+
+  async function submit() {
+    if (!county.trim()) return;
+    setStatus("sending");
+    try {
+      const res = await fetch("/api/county-requests", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state, county, contact, notes }),
+      });
+      const d = await res.json();
+      if (res.ok) { setStatus("done"); setMsg(d.message || "Got it — we'll add it within 48 hours."); setCounty(""); setContact(""); setNotes(""); }
+      else { setStatus("error"); setMsg(d.error || "Something went wrong."); }
+    } catch { setStatus("error"); setMsg("Couldn't submit — try again."); }
+  }
+
+  if (status === "done") {
+    return (
+      <Card className="border-emerald-500/30 bg-emerald-500/5 p-6 text-center">
+        <Check className="mx-auto mb-2 h-8 w-8 text-emerald-400" />
+        <p className="font-semibold">{msg}</p>
+        <p className="mt-1 text-sm text-muted-foreground">Our team maps the county&apos;s records (property value + amount owed) so it computes equity just like the live ones.</p>
+        <button onClick={() => setStatus("idle")} className="mt-4 text-sm font-medium text-primary hover:underline">Request another →</button>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="p-6">
+      <div className="mb-1 flex items-center gap-2">
+        <MapPin className="h-5 w-5 text-primary" />
+        <h3 className="font-bold">Don&apos;t see your county? Request it.</h3>
+      </div>
+      <p className="mb-4 text-sm text-muted-foreground">
+        Tell us the county you want covered. Our team goes through its records site, maps where the
+        <b className="text-foreground"> value</b> and <b className="text-foreground">amount owed</b> live,
+        and we add it — usually <b className="text-foreground">within 48 hours</b>.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[80px_1fr]">
+        <input value={state} onChange={(e) => setState(e.target.value)} maxLength={2} placeholder="ST"
+          className="rounded-lg border border-border bg-background px-3 py-2 text-sm uppercase" />
+        <input value={county} onChange={(e) => setCounty(e.target.value)} placeholder="County name (e.g. Hillsborough)"
+          className="rounded-lg border border-border bg-background px-3 py-2 text-sm" />
+      </div>
+      <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Your name / email (optional — so we can tell you when it's live)"
+        className="mt-3 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" />
+      <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything else? (records site link, priority, etc.)" rows={2}
+        className="mt-3 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" />
+      {status === "error" && <p className="mt-2 text-sm text-red-400">{msg}</p>}
+      <button onClick={submit} disabled={status === "sending" || !county.trim()}
+        className="mt-4 inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">
+        <Send className="h-4 w-4" /> {status === "sending" ? "Sending…" : "Request this county"}
+      </button>
+    </Card>
+  );
+}
+
 export default function JoinPage() {
   return (
     <div className="flex min-h-screen">
@@ -60,7 +124,7 @@ export default function JoinPage() {
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <a href={ZIP} className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90">
-                <Download className="h-4 w-4" /> Download the scanner
+                <Download className="h-4 w-4" /> Download the repo
               </a>
               <a href={REPO} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent">
                 <ExternalLink className="h-4 w-4" /> View on GitHub
@@ -102,6 +166,17 @@ export default function JoinPage() {
             <a href={GUIDE} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline">
               SCRAPER-SETUP.md <ExternalLink className="h-3.5 w-3.5" />
             </a>
+          </div>
+
+          {/* Coverage + request-a-county */}
+          <div>
+            <p className="mb-2 text-sm text-muted-foreground">Counties live right now:</p>
+            <div className="mb-5 flex flex-wrap gap-1.5">
+              {COVERED_COUNTIES.map((c) => (
+                <Badge key={c} className="border-0 bg-primary/10 text-primary">{c}</Badge>
+              ))}
+            </div>
+            <RequestCounty />
           </div>
 
           <p className="text-center text-xs text-muted-foreground">

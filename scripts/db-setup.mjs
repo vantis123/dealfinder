@@ -35,6 +35,16 @@ try {
   // Performance indexes (identical to db/schema.sql so both setup paths produce the same database).
   await c.query('create index if not exists idx_fl_flagged  on foreclosure_leads (flagged)');
   await c.query('create index if not exists idx_fl_county   on foreclosure_leads (county)');
+
+  // County requests — a runner/client asks for a county we don't cover yet (48h SLA to add it).
+  await c.query(`create table if not exists county_requests(
+    id bigint generated always as identity primary key,
+    state text default 'FL', county text not null,
+    requested_by text, contact text, notes text,
+    status text default 'requested',
+    created_at timestamptz default now(), updated_at timestamptz default now(),
+    unique(state, county)
+  )`);
   await c.query('create index if not exists idx_fl_scan     on foreclosure_leads (scan_year, scan_month)');
   await c.query('create index if not exists idx_fl_spread   on foreclosure_leads (spread desc)');
   await c.query('create index if not exists idx_fl_notified on foreclosure_leads (notified_at)');
