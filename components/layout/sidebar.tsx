@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { Flame, Kanban, Gavel, CalendarClock } from "lucide-react";
+import { Flame, Kanban, Gavel, CalendarClock, Laptop } from "lucide-react";
 
 const navItems = [
   { href: "/new-deals", label: "New Deals", icon: Flame, highlight: true },
   { href: "/pipeline", label: "CRM", icon: Kanban },
   { href: "/foreclosures", label: "Foreclosure Leads", icon: Gavel },
   { href: "/auctions", label: "Auctions", icon: CalendarClock },
+  { href: "/join", label: "Add a Scanner", icon: Laptop },
 ];
 
 export function Sidebar() {
