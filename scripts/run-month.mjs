@@ -57,7 +57,9 @@ async function solveToken(){
 const tokenBuf=[]; let fillTokens=true;
 const PRESOLVE = Math.max(2, CONCURRENCY + 1);
 async function tokenFiller(){ while(fillTokens){ if(tokenBuf.length<PRESOLVE){ try{ tokenBuf.push({t:await solveToken(),at:Date.now()}); }catch(e){ await sleep(1500); } } else await sleep(400); } }
-async function getToken(){ for(;;){ while(tokenBuf.length&&Date.now()-tokenBuf[0].at>100000) tokenBuf.shift(); if(tokenBuf.length) return tokenBuf.shift().t; await sleep(400); } }
+// Bounded wait: if CapSolver can't produce a token in 10 min, THROW — an unbounded for(;;) here
+// once hung the whole daily pipeline for 7.5h (2026-07-14) with zero log output.
+async function getToken(maxWaitMs=600000){ const t0=Date.now(); for(;;){ while(tokenBuf.length&&Date.now()-tokenBuf[0].at>100000) tokenBuf.shift(); if(tokenBuf.length) return tokenBuf.shift().t; if(Date.now()-t0>maxWaitMs) throw new Error(`captcha token wait exceeded ${maxWaitMs/60000} min (CapSolver failing?)`); await sleep(400); } }
 
 // ---- extraction (free) ----
 // county -> valid property ZIP prefixes. Guards against grabbing the foreclosure FIRM's
@@ -161,7 +163,13 @@ async function runSearch(p,tok){
   await p.goto('https://myeclerk.myorangeclerk.com/Cases/Search',{waitUntil:'domcontentloaded'});
   await p.evaluate(({df,dt})=>{const t=document.querySelector('button.multiselect,.btn-group .multiselect,[class*=multiselect].dropdown-toggle');if(t)t.click();const f=document.querySelector('#input-caseTypes');if(f){f.value='Foreclosure';f.dispatchEvent(new Event('keyup',{bubbles:true}));}const cb=document.querySelector('input[type=checkbox][value="42"]');if(cb&&!cb.checked)cb.click();const d=document.querySelector('#DateFrom');if(d){d.value=df;d.dispatchEvent(new Event('input',{bubbles:true}));d.dispatchEvent(new Event('change',{bubbles:true}));}const d2=document.querySelector('#DateTo');if(d2){d2.value=dt;d2.dispatchEvent(new Event('input',{bubbles:true}));d2.dispatchEvent(new Event('change',{bubbles:true}));}if(t)t.click();},{df:DATE_FROM,dt:DATE_TO});
   await p.evaluate((t)=>{window.__captok=t;let ta=document.getElementById('g-recaptcha-response');if(!ta){ta=document.createElement('textarea');ta.id='g-recaptcha-response';ta.name='g-recaptcha-response';ta.style.display='none';(document.querySelector('form')||document.body).appendChild(ta);}ta.value=t;const el=document.querySelector('[data-callback]');const cb=el&&el.getAttribute('data-callback');if(cb&&typeof window[cb]==='function'){try{window[cb](t);}catch(e){}}const btn=document.querySelector('#caseSearch');if(btn)btn.removeAttribute('disabled');},tok);
-  await Promise.all([p.waitForLoadState('networkidle').catch(()=>{}),p.click('#caseSearch',{force:true}).catch(()=>{})]);
+  // 2026-07-14: clicking #caseSearch stopped submitting (clerk added a reCAPTCHA v3 layer + new page JS
+  // on ~07-12; the click dies client-side with no POST). Native form.submit() bypasses the page's submit
+  // interception and the server still accepts the CapSolver v2 token — verified 23 rows on 07-11→07-14.
+  await Promise.all([
+    p.waitForLoadState('networkidle').catch(()=>{}),
+    p.evaluate(()=>{const f=document.forms['SearchForm']||document.querySelector('form[name=SearchForm],form');if(f)f.submit();}).catch(()=>{}),
+  ]);
   await p.waitForTimeout(2500);
   await p.evaluate(()=>{try{const $=window.jQuery;if($&&$.fn.dataTable&&$.fn.dataTable.isDataTable('#caseList'))$('#caseList').DataTable().page.len(-1).draw(false);}catch(e){}});
   await p.waitForTimeout(2500);

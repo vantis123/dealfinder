@@ -84,6 +84,38 @@ function buildReceivers(token, chat) {
   return list.filter(r => { const k = r.token + '|' + r.chat; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
+// Low-balance watch — when a paid service is near dry, the daily report itself says so, with the
+// refill link. Thresholds: Apify ≥ APIFY_WARN_PCT % of monthly cap (default 80), CapSolver below
+// CAPSOLVER_WARN_USD (default $2). Whoever reads the report can refill in one tap.
+async function usageWarnings() {
+  const warn = [];
+  const T = { signal: AbortSignal.timeout(8000) };
+  const pctWarn = parseFloat(env.APIFY_WARN_PCT || '80');
+  const capWarn = parseFloat(env.CAPSOLVER_WARN_USD || '2');
+  for (const [label, token] of [['Apify', env.APIFY_API_TOKEN], ['Apify (Dyer)', env.APIFY_API_TOKEN_DYER]]) {
+    if (!token) continue;
+    try {
+      const d = (await fetch(`https://api.apify.com/v2/users/me/limits?token=${token}`, T).then(r => r.json()))?.data;
+      const used = d?.current?.monthlyUsageUsd, cap = d?.limits?.maxMonthlyUsageUsd;
+      if (used != null && cap && (used / cap) * 100 >= pctWarn) {
+        const reset = (d.monthlyUsageCycle?.endAt || '').slice(0, 10);
+        warn.push(`⚠️ <b>${label} at $${used.toFixed(2)}/$${cap}</b> (${Math.round(used / cap * 100)}%) — <a href="https://console.apify.com/billing">refill / upgrade</a> or valuations pause until ${reset}`);
+      }
+    } catch (e) { /* usage check never blocks the report */ }
+  }
+  if (env.CAPSOLVER_API_KEY) {
+    try {
+      const r = await fetch('https://api.capsolver.com/getBalance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientKey: env.CAPSOLVER_API_KEY }), ...T }).then(r => r.json());
+      if (r?.errorId === 0 && r.balance < capWarn) {
+        warn.push(`⚠️ <b>CapSolver balance $${r.balance.toFixed(2)}</b> — <a href="https://dashboard.capsolver.com/dashboard/overview">refill</a> or Orange/Polk scans stop solving captchas`);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  // FUND_LINK = a Stripe Payment Link — lets Dyer (or anyone) buy credits with THEIR card, no vendor login.
+  if (warn.length && env.FUND_LINK) warn.push(`💳 <a href="${esc(env.FUND_LINK)}">Buy scanner credits with your card</a>`);
+  return warn;
+}
+
 async function send(token, chat, text) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
@@ -144,14 +176,18 @@ export async function notifyTelegram({ token, chat, county, preview = false, mar
 
   const when = new Date();
 
+  const warnings = await usageWarnings();
+
   if (!leads.length) {
-    const msg = `✅ <b>DealFinder</b> ran ${niceDate(when)} — no new doors worth knocking today.`;
-    if (preview) { console.log('\n----- PREVIEW (quiet day) -----\n' + toPlain(msg) + '\n'); return { preview: true, leads: 0 }; }
+    let msg = `✅ <b>DealFinder</b> ran ${niceDate(when)} — no new doors worth knocking today.`;
+    if (warnings.length) msg += '\n\n' + warnings.join('\n');
+    if (preview) { console.log('\n----- PREVIEW (quiet day) -----\n' + toPlain(msg) + '\n'); return { preview: true, leads: 0, warnings: warnings.length }; }
     if (heartbeat) for (const r of receivers) await send(r.token, r.chat, msg);
-    return { sent: 0 };
+    return { sent: 0, warnings: warnings.length };
   }
 
   const messages = buildReport(leads, when);
+  if (warnings.length) messages[messages.length - 1] += '\n\n' + warnings.join('\n');
 
   if (preview) {
     console.log(`\n================= DAILY DOOR-KNOCK REPORT — PREVIEW${sample ? ' (sample: current top leads)' : ''} =================\n`);

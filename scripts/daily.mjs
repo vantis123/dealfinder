@@ -43,26 +43,41 @@ for (const county of ready) {
   log(`=== ${county} (${COUNTIES[county].name}) ===`);
   try {
     // DATE_FROM/DATE_TO = rolling window. COUNTY tags rows. NOTIFY_ON_SCAN=0 → one combined report below.
+    // hard timeout: a wedged browser once held run-month.mjs at 0/0 for 7.5h (2026-07-14) and the
+    // whole pipeline (auctions, Telegram report) never ran — kill and move to the next county instead.
     execFileSync(process.execPath, [join(__dirname, SCRIPTS[county] || 'run-month.mjs')], {
       stdio: 'inherit',
-      env: { ...process.env, COUNTY: county, DATE_FROM, DATE_TO, NOTIFY_ON_SCAN: '0' },
+      timeout: parseInt(env.CLERK_TIMEOUT_MIN || '150', 10) * 60_000, killSignal: 'SIGKILL',
+      // USE_AI=0 (Phillip 2026-07-14): OCR/regex-only everywhere, like Orange — the non-Orange county
+      // scripts default Claude vision ON, which was the biggest controllable API line ($5-15/mo).
+      // Scanned-image PDFs land in manual_review instead. Set USE_AI=1 in .env to re-enable.
+      env: { ...process.env, COUNTY: county, DATE_FROM, DATE_TO, NOTIFY_ON_SCAN: '0', USE_AI: env.USE_AI || '0' },
     });
   } catch (e) {
-    log(`scan FAILED for ${county}:`, String(e.message).slice(0, 100));
+    log(`scan FAILED for ${county}:`, e.code === 'ETIMEDOUT' ? `TIMED OUT after ${env.CLERK_TIMEOUT_MIN || 150} min (killed)` : String(e.message).slice(0, 100));
   }
 }
 
 // Auctions (RealForeclose) — stealth-walk each auction county's calendar, value via Zillow → auction_leads.
+// CADENCE (Phillip, 2026-07-14): TUESDAYS ONLY, and only the NEXT WEEK of auction dates — running
+// this DAILY across 4 counties × 6 months got the home IP 403-banned by RealAuction's WAF on 07-12.
+// AUCTION_DAYS = comma-separated JS weekdays (0=Sun … 6=Sat). Default "2" = Tuesday.
+// AUCTION_DAYS_AHEAD limits how far ahead run-realforeclose scans (default 7 days).
 const AUCTION_COUNTIES = (env.AUCTION_COUNTIES || 'Seminole,Orange,Volusia,Polk').split(',').map(s => s.trim()).filter(Boolean);
-const AUCTION_MONTHS = env.AUCTION_MONTHS_AHEAD || '6';
-for (const county of AUCTION_COUNTIES) {
+const AUCTION_MONTHS = env.AUCTION_MONTHS_AHEAD || '2';   // calendar pages to walk (a 7-day window can straddle a month boundary)
+const AUCTION_AHEAD = env.AUCTION_DAYS_AHEAD || '7';
+const auctionDays = (env.AUCTION_DAYS || '2').split(',').map(Number);
+if (!auctionDays.includes(new Date().getDay())) {
+  log(`auctions: skipped today (runs on weekday(s) ${auctionDays.join(',')} — set AUCTION_DAYS to change)`);
+} else for (const county of AUCTION_COUNTIES) {
   log(`=== ${county} auctions (RealForeclose) ===`);
   try {
     execFileSync(process.execPath, [join(__dirname, 'run-realforeclose.mjs')], {
       stdio: 'inherit',
-      env: { ...process.env, COUNTY: county.toLowerCase(), ENGINE: 'camoufox', HEADLESS: '1', MONTHS_AHEAD: AUCTION_MONTHS },
+      timeout: parseInt(env.AUCTION_TIMEOUT_MIN || '120', 10) * 60_000, killSignal: 'SIGKILL',
+      env: { ...process.env, COUNTY: county.toLowerCase(), ENGINE: 'camoufox', HEADLESS: '1', MONTHS_AHEAD: AUCTION_MONTHS, DAYS_AHEAD: AUCTION_AHEAD },
     });
-  } catch (e) { log(`auction scan FAILED for ${county}:`, String(e.message).slice(0, 100)); }
+  } catch (e) { log(`auction scan FAILED for ${county}:`, e.code === 'ETIMEDOUT' ? `TIMED OUT after ${env.AUCTION_TIMEOUT_MIN || 120} min (killed)` : String(e.message).slice(0, 100)); }
 }
 
 // Combined daily summary across all counties → scan-status.json (drives the dashboard "daily update" popup).

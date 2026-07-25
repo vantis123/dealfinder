@@ -9,6 +9,7 @@ import { loadEnv } from './_env.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const env = loadEnv(ROOT); // .env locally, process.env on Railway/containers
+// Phillip 2026-07-14: Apify PRIMARY (rotating proxies), local Camoufox Zillow = BACKUP when maxed/failed.
 const APIFY = env.APIFY_API_TOKEN;
 const SHEET = env.SHEET_WEBHOOK_URL || '';
 const RUN_START_MS = Date.now(); // captured before any update — used to sync ONLY rows touched this run
@@ -17,7 +18,35 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const toSheetRow = r => ({ caseNumber: r.case_number, plaintiff: r.plaintiff, defendant: r.defendant, type: r.type, address: r.property_address || '', owed: r.owed_with_buffer || '', zillow: r.zillow_value || '', spread: r.spread || '', knock: r.flagged ? 'KNOCK' : (r.review_status === 'manual_review' ? 'REVIEW' : ''), complaint: r.complaint_url ? 'link' : 'X', value: r.value_url ? 'link' : 'X', status: r.review_status, county: r.county || 'Orange' });
 
-if (!APIFY) { console.log('APIFY_API_TOKEN missing in .env — skipping valuation'); process.exit(0); }
+// Local Camoufox Zillow fallback (free) — keeps valuations flowing when the Apify plan is over its
+// monthly cap (e.g. 2026-07: Dyer's free $5/mo burned out until Aug 7). Same flow as run-month.mjs.
+const money = s => { const m = (s == null ? '' : String(s)).replace(/[^0-9.]/g, ''); return m ? parseFloat(m) : null; };
+async function zillowLocal(a) {
+  let zctx = null;
+  try {
+    const { Camoufox } = await import('camoufox-js');
+    const slug = String(a).replace(/\bAlt\.?\s*/ig, 'Alternate ').replace(/[#.]/g, '').replace(/,/g, '').replace(/\s+/g, '-').replace(/-+/g, '-');
+    zctx = await Camoufox({ headless: true, user_data_dir: `/tmp/camou-vwa-zillow-${process.pid}-${Math.random().toString(36).slice(2, 7)}` });
+    const p = zctx.pages()[0] || await zctx.newPage();
+    await p.goto(`https://www.zillow.com/homes/${encodeURIComponent(slug)}_rb/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await p.waitForTimeout(4000);
+    const h = await p.content();
+    const m = h.match(/Zestimate[^$]{0,40}\$([\d,]{6,})/i) || h.match(/"price":(\d{5,})/i) || h.match(/"zestimate":\s*(\d{5,})/i) || h.match(/\$([\d,]{6,})\b[^<]{0,30}(?:Zestimate|est\.)/i);
+    return m ? money(m[1]) : null;
+  } catch (e) { return null; }
+  finally { if (zctx) await zctx.close().catch(() => {}); }
+}
+async function applyValue(r, z) {
+  const owed = Number(r.owed_with_buffer) || 0;
+  const spread = owed ? z - owed : null;
+  const flagged = spread != null ? spread >= 200000 : null;
+  const patch = { zillow_value: z, spread, flagged, updated_at: new Date().toISOString() };
+  if (flagged) { patch.review_status = 'auto'; patch.review_reason = null; }
+  await sb.from('foreclosure_leads').update(patch).eq('case_number', r.case_number);
+  return flagged;
+}
+
+if (!APIFY) { console.log('APIFY_API_TOKEN missing in .env — using local Zillow backup only'); }
 
 // Fetch leads to value over the Supabase HTTPS API — NOT direct Postgres. Railway can't reach Supabase's
 // IPv6-only :5432 endpoint (ENETUNREACH); the REST API always works.
@@ -28,27 +57,42 @@ const { data: lqData } = await lq;
 const rows = lqData || [];
 console.log(`valuing ${rows.length} addresses via Apify…`);
 
-if (rows.length) {
+const valuedSet = new Set();
+// BOTH Apify subscriptions, active first — if the active account is maxed out ("Monthly usage hard
+// limit exceeded"), the run automatically alternates to the other account. Only when BOTH are dry
+// does valuation fall through to local Zillow + the Telegram low-balance alert.
+const APIFY_TOKENS = [
+  { label: 'active', token: APIFY },
+  { label: 'standby', token: env.APIFY_API_TOKEN_DYER },
+].filter(t => t.token && String(t.token).startsWith('apify_api_'));
+let APIFY_USED = null; // which token actually ran (used for status/items fetches below)
+if (rows.length && APIFY_TOKENS.length) {
   const addresses = rows.map(r => r.property_address);
-  // Start the actor with a few retries — a transient rate-limit (429, common when two daily runs overlap)
-  // used to return an error body, leaving datasetId undefined and crashing the loop below ("items is not iterable").
+  // Start the actor: per token, retry transient errors twice; on a hard "usage limit exceeded",
+  // alternate to the next account immediately.
   let runId, datasetId;
-  for (let attempt = 0; attempt < 3 && !datasetId; attempt++) {
-    if (attempt) await sleep(15000);
-    const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${APIFY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json()).catch(e => ({ error: { message: String(e.message) } }));
-    runId = start.data?.id; datasetId = start.data?.defaultDatasetId;
-    if (!datasetId) console.log(`  apify start failed (attempt ${attempt + 1}/3):`, JSON.stringify(start.error || start).slice(0, 120));
+  for (const acct of APIFY_TOKENS) {
+    for (let attempt = 0; attempt < 2 && !datasetId; attempt++) {
+      if (attempt) await sleep(15000);
+      const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${acct.token}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json()).catch(e => ({ error: { message: String(e.message) } }));
+      runId = start.data?.id; datasetId = start.data?.defaultDatasetId;
+      if (datasetId) { APIFY_USED = acct.token; if (acct.label !== 'active') console.log('  apify: active account maxed — alternated to the standby account'); break; }
+      const msg = JSON.stringify(start.error || start).slice(0, 120);
+      console.log(`  apify start failed (${acct.label}, attempt ${attempt + 1}/2):`, msg);
+      if (/limit exceeded|platform-feature-disabled/i.test(msg)) break; // hard cap → try the other account
+    }
+    if (datasetId) break;
   }
-  if (!datasetId) { console.log('apify start never succeeded — skipping valuation this run (leads kept, will re-value next run)'); }
+  if (!datasetId) { console.log('apify: BOTH accounts refused — skipping valuation this run (leads kept, will re-value next run)'); }
   else {
   let status = 'RUNNING';
   for (let i = 0; i < 180 && (status === 'RUNNING' || status === 'READY'); i++) {
     await sleep(5000);
-    status = (await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY}`).then(r => r.json()).catch(() => ({}))).data?.status;
+    status = (await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_USED}`).then(r => r.json()).catch(() => ({}))).data?.status;
     if (i % 4 === 0) console.log('  apify:', status);
     if (['SUCCEEDED', 'FAILED', 'ABORTED'].includes(status)) break;
   }
-  const rawItems = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY}&fields=addressOrUrlFromInput,streetAddress,zestimate,price,taxAssessedValue`).then(r => r.json()).catch(() => []);
+  const rawItems = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_USED}&fields=addressOrUrlFromInput,streetAddress,zestimate,price,taxAssessedValue`).then(r => r.json()).catch(() => []);
   // Apify returns an ARRAY on success but an {error:{...}} OBJECT on failure — guard so a bad response never crashes the run.
   const items = Array.isArray(rawItems) ? rawItems : [];
   if (!Array.isArray(rawItems)) console.log('apify items fetch returned non-array:', JSON.stringify(rawItems).slice(0, 120));
@@ -60,17 +104,25 @@ if (rows.length) {
     let z = byInput.get(norm(r.property_address));
     if (z == null) z = byStreet.get(norm(r.property_address.split(',')[0]));
     if (z == null) continue;
-    valued++;
-    const owed = Number(r.owed_with_buffer) || 0;
-    const spread = owed ? z - owed : null;
-    const flagged = spread != null ? spread >= 200000 : null;
-    if (flagged) worth++;
-    const patch = { zillow_value: z, spread, flagged, updated_at: new Date().toISOString() };
-    if (flagged) { patch.review_status = 'auto'; patch.review_reason = null; }
-    await sb.from('foreclosure_leads').update(patch).eq('case_number', r.case_number);
+    valued++; valuedSet.add(r.case_number);
+    if (await applyValue(r, z)) worth++;
   }
   console.log(`valued ${valued}/${rows.length} | WORTH-IT (spread ≥ $200k): ${worth}`);
   }
+}
+
+// Local Zillow fallback: whatever Apify didn't value (over-limit, failed, or no token), capped per run.
+const LOCAL_MAX = parseInt(process.env.ZILLOW_LOCAL_MAX || '40', 10);
+const missing = rows.filter(r => !valuedSet.has(r.case_number)).slice(0, LOCAL_MAX);
+if (missing.length) {
+  console.log(`zillow-local: valuing ${missing.length}/${rows.length - valuedSet.size} via Camoufox (cap ${LOCAL_MAX})…`);
+  let ok = 0, worthLocal = 0;
+  for (const r of missing) {
+    const z = await zillowLocal(r.property_address);
+    if (z != null) { ok++; if (await applyValue(r, z)) worthLocal++; }
+    await sleep(1500);
+  }
+  console.log(`zillow-local: valued ${ok}/${missing.length} | newly WORTH-IT: ${worthLocal}`);
 }
 
 // pull the FULL final rows once, then sync the sheet from complete data (no partial overwrites)

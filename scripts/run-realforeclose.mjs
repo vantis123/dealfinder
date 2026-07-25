@@ -34,6 +34,7 @@ const PASS = env.REALFORECLOSE_PASS || process.env.RF_PASS;
 const HEADLESS = process.env.HEADLESS !== '0';
 const ENGINE = process.env.ENGINE || 'chromium';                             // 'camoufox' = stealth (beats the 403)
 const MONTHS_AHEAD = parseInt(process.env.MONTHS_AHEAD || '9', 10);          // walk rest of year
+const DAYS_AHEAD = parseInt(process.env.DAYS_AHEAD || '0', 10);              // >0 = only auction dates within N days (Phillip 2026-07-14: weekly Tue run scans just the next week)
 const MAX_DATES = parseInt(process.env.MAX_DATES || '0', 10);                // 0 = all; >0 limits (for quick tests)
 const SPREAD = parseInt(process.env.AUCTION_SPREAD || '100000', 10);         // Phillip's auction equity floor
 const base = `https://${COUNTY}.realforeclose.com`;
@@ -88,9 +89,20 @@ async function clearOKs(page, n = 6) {
   }
 }
 
+// RealAuction's WAF serves a bare "403 Forbidden" page (~111 bytes) when it bans an IP —
+// happened 2026-07-12 after daily 4-county × 6-month calendar walks. Detect it and abort
+// loudly instead of silently parsing 0 listings per date for an hour.
+async function assertNotBlocked(page, where) {
+  const html = await page.content().catch(() => '');
+  if (/403 Forbidden/i.test(html) || html.replace(/\s/g, '').length < 300) {
+    throw new Error(`BLOCKED_403 at ${where} — RealAuction WAF is refusing this IP. Rotate the IP (reboot router) or wait for the ban to lift; aborting ${COUNTY} to avoid deepening the ban.`);
+  }
+}
+
 async function ensureLogin(page) {
   await page.goto(`${base}/index.cfm?ZACTION=USER&ZMETHOD=CALENDAR`, { waitUntil: 'domcontentloaded' });
   await sleep(2500);
+  await assertNotBlocked(page, 'calendar/login');
   if (await page.$('#LogName')) {
     log('logging in…');
     await page.fill('#LogName', USER);
@@ -115,10 +127,12 @@ async function collectAuctionDates(page) {
     await page.waitForFunction(() => document.querySelector('.CALBOX'), { timeout: 12000 }).catch(() => {});
     const days = await page.$$eval('.CALBOX[dayid]', els => els.map(e => ({ d: e.getAttribute('dayid'), t: e.innerText || '' })));
     let added = 0;
+    const horizon = DAYS_AHEAD ? new Date(today.getTime() + DAYS_AHEAD * 86400_000) : null;
     for (const { d, t } of days) {
       if (!/FC|foreclosure/i.test(t)) continue;               // day has foreclosure auction(s)
       const [m, dd, y] = d.split('/').map(Number);
-      if (new Date(y, m - 1, dd) >= today) { dates.add(d); added++; }
+      const dt = new Date(y, m - 1, dd);
+      if (dt >= today && (!horizon || dt <= horizon)) { dates.add(d); added++; }
     }
     log(`month ${month + 1}/${MONTHS_AHEAD}: +${added} auction day(s)`);
     // click the blue NEXT-month link (text like "August> >" — has ">" arrows, not "<<")
@@ -141,6 +155,7 @@ async function collectAuctionDates(page) {
 async function parseDay(page, date) {
   await page.goto(`${base}/index.cfm?zaction=AUCTION&Zmethod=DAYLIST&AUCTIONDATE=${date}`, { waitUntil: 'domcontentloaded' });
   await sleep(2500);
+  await assertNotBlocked(page, `DAYLIST ${date}`);
   await clearOKs(page, 2);
   await page.waitForFunction(() => /final judgment|no auctions|case #/i.test(document.body.innerText), { timeout: 15000 }).catch(() => {});
   await sleep(1500);
@@ -195,6 +210,7 @@ async function upsert(rec) {
       final_judgment: rec.finalJudgment ?? null,
       assessed_value: rec.assessed ?? null,
       zillow_value: rec.zillow ?? null,
+      valued_at: rec.valuedAt ?? null,
       value_used: rec.value ?? null,
       value_source: rec.valueSource || null,
       spread: rec.spread ?? null,
@@ -215,32 +231,110 @@ async function upsert(rec) {
 
 // ---- Zillow market value via Apify (rotating proxies). Assessed value undervalues, so this is
 //      what surfaces the real deals. Same actor the clerk scraper uses. ----
-const APIFY = env.APIFY_API_TOKEN || null;   // set APIFY_API_TOKEN as a Railway env var
+// Phillip 2026-07-14: Apify is PRIMARY (rotating proxies — home IP gets PerimeterX-walled by Zillow);
+// the local Camoufox Zillow pass below is the BACKUP that kicks in when Apify is maxed out or fails.
+// With the valued_at cache + Tuesday/7-day cadence, weekly Apify volume should fit the $5/mo free plan.
+const APIFY = env.APIFY_API_TOKEN || null;
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const cleanAddr = a => String(a || '').replace(/FL-\s*/i, 'FL ').replace(/\s{2,}/g, ' ').trim();
+// Zillow value straight from zillow.com via local Camoufox (free — same proven flow as run-month.mjs).
+// Fallback for when Apify is over its monthly limit; capped per run so Zillow doesn't block the home IP.
+async function zillowLocal(a) {
+  let zctx = null;
+  try {
+    const slug = cleanAddr(a).replace(/\bAlt\.?\s*/ig, 'Alternate ').replace(/[#.]/g, '').replace(/,/g, '').replace(/\s+/g, '-').replace(/-+/g, '-');
+    const { Camoufox } = await import('camoufox-js');
+    zctx = await Camoufox({ headless: true, user_data_dir: `/tmp/camou-rf-zillow-${process.pid}-${Math.random().toString(36).slice(2, 7)}` });
+    const p = zctx.pages()[0] || await zctx.newPage();
+    await p.goto(`https://www.zillow.com/homes/${encodeURIComponent(slug)}_rb/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await p.waitForTimeout(4000);
+    const h = await p.content();
+    const m = h.match(/Zestimate[^$]{0,40}\$([\d,]{6,})/i) || h.match(/"price":(\d{5,})/i) || h.match(/"zestimate":\s*(\d{5,})/i) || h.match(/\$([\d,]{6,})\b[^<]{0,30}(?:Zestimate|est\.)/i);
+    return m ? money(m[1]) : null;
+  } catch (e) { return null; }
+  finally { if (zctx) await zctx.close().catch(() => {}); }
+}
+
+// Value every record — CHEAPEST SOURCE FIRST:
+//   1. cache: reuse auction_leads.zillow_value when valued within APIFY_VALUE_TTL_DAYS (default 14).
+//      The same ~50 auction dates get re-scanned every run, so without this Apify re-valued the
+//      whole county daily — that's what burned the $5/mo free plan in 4 days (2026-07-08 → 07-12).
+//   2. Apify Zillow actor: ONLY the addresses with no fresh cached value.
+//   3. local Camoufox Zillow: whatever Apify couldn't do (over-limit / failed), capped.
 async function valueViaApify(recs) {
   const withAddr = recs.filter(r => r.address);
-  if (!APIFY || !withAddr.length) { log('apify: skipped (no token or addresses)'); return; }
-  const addresses = [...new Set(withAddr.map(r => cleanAddr(r.address)))];
-  log(`apify: valuing ${addresses.length} address(es) via Zillow…`);
-  try {
-    const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${APIFY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json());
-    const runId = start.data?.id, dsId = start.data?.defaultDatasetId;
-    let status = 'RUNNING';
-    for (let i = 0; i < 120 && (status === 'RUNNING' || status === 'READY'); i++) {
-      await sleep(5000);
-      const s = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY}`).then(r => r.json());
-      status = s.data?.status;
-      if (status === 'SUCCEEDED' || status === 'FAILED' || status === 'ABORTED') break;
+  if (!withAddr.length) { log('valuation: skipped (no addresses)'); return; }
+
+  // -- 1. cache pass --
+  const TTL_MS = parseInt(process.env.APIFY_VALUE_TTL_DAYS || '14', 10) * 86400_000;
+  const caseNums = withAddr.map(r => r.caseNumber).filter(Boolean);
+  const cache = new Map();
+  for (let i = 0; i < caseNums.length; i += 150) {
+    const { data } = await sb.from('auction_leads').select('case_number, zillow_value, valued_at').in('case_number', caseNums.slice(i, i + 150)).not('zillow_value', 'is', null);
+    for (const row of data || []) cache.set(row.case_number, row);
+  }
+  let fromCache = 0;
+  for (const r of withAddr) {
+    const c = cache.get(r.caseNumber);
+    if (c && c.valued_at && (Date.now() - new Date(c.valued_at).getTime()) < TTL_MS) {
+      r.zillow = Number(c.zillow_value); r.valuedAt = c.valued_at; fromCache++;
     }
-    log('apify:', status);
-    const items = await fetch(`https://api.apify.com/v2/datasets/${dsId}/items?token=${APIFY}&fields=addressOrUrlFromInput,streetAddress,zestimate,price,taxAssessedValue`).then(r => r.json());
-    const byInput = new Map(), byStreet = new Map();
-    for (const it of items) { const v = it.zestimate || it.price || it.taxAssessedValue || null; if (it.addressOrUrlFromInput) byInput.set(norm(it.addressOrUrlFromInput), v); if (it.streetAddress) byStreet.set(norm(it.streetAddress), v); }
-    let valued = 0;
-    for (const r of recs) { if (!r.address) continue; let z = byInput.get(norm(cleanAddr(r.address))); if (z == null) z = byStreet.get(norm(r.address.split(',')[0])); if (z != null) { r.zillow = z; valued++; } }
-    log(`apify: valued ${valued}/${withAddr.length}`);
-  } catch (e) { log('apify err', String(e.message).slice(0, 80)); }
+  }
+  let missing = withAddr.filter(r => r.zillow == null);
+  log(`valuation: ${fromCache} from cache · ${missing.length} to fetch (TTL ${TTL_MS / 86400_000}d)`);
+
+  // -- 2. Apify pass (only the missing) --
+  if (APIFY && missing.length) {
+    const addresses = [...new Set(missing.map(r => cleanAddr(r.address)))];
+    log(`apify: valuing ${addresses.length} address(es) via Zillow…`);
+    try {
+      const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${APIFY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json());
+      const runId = start.data?.id, dsId = start.data?.defaultDatasetId;
+      if (!runId) {
+        log('apify: START REFUSED —', JSON.stringify(start.error || start).slice(0, 140));
+        log('apify: (free plan caps at $5/mo — falling back to local Zillow)');
+      } else {
+        let status = 'RUNNING';
+        for (let i = 0; i < 120 && (status === 'RUNNING' || status === 'READY'); i++) {
+          await sleep(5000);
+          const s = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY}`).then(r => r.json());
+          status = s.data?.status;
+          if (status === 'SUCCEEDED' || status === 'FAILED' || status === 'ABORTED') break;
+        }
+        log('apify:', status);
+        const items = await fetch(`https://api.apify.com/v2/datasets/${dsId}/items?token=${APIFY}&fields=addressOrUrlFromInput,streetAddress,zestimate,price,taxAssessedValue`).then(r => r.json());
+        const byInput = new Map(), byStreet = new Map();
+        for (const it of (Array.isArray(items) ? items : [])) { const v = it.zestimate || it.price || it.taxAssessedValue || null; if (it.addressOrUrlFromInput) byInput.set(norm(it.addressOrUrlFromInput), v); if (it.streetAddress) byStreet.set(norm(it.streetAddress), v); }
+        let valued = 0;
+        for (const r of missing) { let z = byInput.get(norm(cleanAddr(r.address))); if (z == null) z = byStreet.get(norm(r.address.split(',')[0])); if (z != null) { r.zillow = z; r.valuedAt = new Date().toISOString(); valued++; } }
+        log(`apify: valued ${valued}/${missing.length}`);
+      }
+    } catch (e) { log('apify err', String(e.message).slice(0, 80)); }
+  } else if (!APIFY) log('apify: no token — using local Zillow backup only');
+
+  // -- 3. local Zillow fallback for whatever is still missing --
+  missing = withAddr.filter(r => r.zillow == null);
+  const LOCAL_MAX = parseInt(process.env.ZILLOW_LOCAL_MAX || '40', 10);
+  if (missing.length) {
+    const batch = missing.slice(0, LOCAL_MAX);
+    log(`zillow-local: valuing ${batch.length}/${missing.length} via Camoufox (cap ${LOCAL_MAX})…`);
+    let ok = 0;
+    for (const r of batch) {
+      const v = await zillowLocal(r.address);
+      if (v != null) { r.zillow = v; r.valuedAt = new Date().toISOString(); ok++; }
+      await sleep(1500);
+    }
+    log(`zillow-local: valued ${ok}/${batch.length}`);
+  }
+
+  // -- 4. last resort: a stale cached value beats nulling out a previously good one --
+  let staleReuse = 0;
+  for (const r of withAddr) {
+    if (r.zillow != null) continue;
+    const c = cache.get(r.caseNumber);
+    if (c && c.zillow_value != null) { r.zillow = Number(c.zillow_value); r.valuedAt = c.valued_at; staleReuse++; }
+  }
+  if (staleReuse) log(`valuation: reused ${staleReuse} stale cached value(s) (re-value failed this run)`);
 }
 
 // ---- main ----
@@ -261,8 +355,14 @@ try {
   let dates = await collectAuctionDates(page);
   if (MAX_DATES) dates = dates.slice(0, MAX_DATES);
   log(`${dates.length} future auction date(s) for ${COUNTY}${MAX_DATES ? ` (capped at ${MAX_DATES})` : ''}`);
+  let emptyStreak = 0;   // circuit breaker: N dates in a row with an unreadable/blocked page → stop hammering
   for (const date of dates) {
     const items = await parseDay(page, date);
+    if (!items.length) {
+      const ok = await page.evaluate(() => /final judgment|no auctions|case #|auction/i.test(document.body.innerText)).catch(() => false);
+      emptyStreak = ok ? 0 : emptyStreak + 1;
+      if (emptyStreak >= 4) throw new Error('BLOCKED_SOFT — 4 consecutive dates served unreadable pages (rate-limit/WAF); aborting to avoid deepening the block.');
+    } else emptyStreak = 0;
     let kept = 0;
     for (const it of items) {
       if (it.parcelId && SKIP_PARCEL.test(it.parcelId)) continue;   // skip timeshare / liquor license
