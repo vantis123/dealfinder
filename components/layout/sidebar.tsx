@@ -12,7 +12,7 @@ const navItems = [
   { href: "/foreclosures", label: "Foreclosure Leads", icon: Gavel },
   { href: "/auctions", label: "Auctions", icon: CalendarClock },
   { href: "/usage", label: "Usage", icon: Gauge },
-  { href: "/join", label: "Add a Scanner", icon: Laptop },
+  { href: "/join", label: "Request a County", icon: Laptop },
 ];
 
 export function Sidebar() {

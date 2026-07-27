@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Gauge, RefreshCw, Loader2, Database, Bot, Send, Activity, FileScan, CircleDollarSign, ExternalLink } from "lucide-react";
+import { Gauge, RefreshCw, Loader2, Database, Bot, Send, Activity, CircleDollarSign, ExternalLink } from "lucide-react";
 
 // Usage tab — one place to see how much of every service DealFinder is burning, with a
 // one-click REFILL link on every card that can run dry. Low balances also get pushed into
@@ -129,6 +129,32 @@ export default function UsagePage() {
         ) : !data ? (
           <p className="text-sm text-muted-foreground">Couldn&apos;t load usage — is the dev server running with the .env loaded?</p>
         ) : (
+          <>
+          {/* Scan health — full-width band across the top */}
+          <Card className="mb-3 border-primary/25 bg-primary/5 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Activity className="h-5 w-5 shrink-0 text-primary" />
+                <h2 className="text-sm font-bold">Scan health</h2>
+                {data.scan ? (
+                  <span className="flex items-center gap-1.5 rounded-full bg-background/60 px-2 py-0.5 text-xs font-semibold">
+                    <Dot ok={!data.scan.running || undefined} /> {data.scan.running ? "RUNNING" : "idle"}
+                    <span className="text-muted-foreground">· {data.scan.county}</span>
+                  </span>
+                ) : <span className="text-xs text-muted-foreground">No scan yet.</span>}
+              </div>
+              {data.scan && (
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs lg:text-sm">
+                  <span><b className="text-foreground">{data.scan.done ?? "?"}/{data.scan.total ?? "?"}</b> <span className="text-muted-foreground">cases</span></span>
+                  <span><b className="text-emerald-400">{data.scan.knock ?? 0}</b> <span className="text-muted-foreground">knock</span></span>
+                  <span><b className="text-amber-400">{data.scan.review ?? 0}</b> <span className="text-muted-foreground">review</span></span>
+                  {data.scan.finishedAt && <span className="text-muted-foreground">last run {ago(data.scan.finishedAt)}</span>}
+                  {data.cronLog && <span className="text-muted-foreground">log {data.cronLog.sizeMb} MB · {ago(data.cronLog.modifiedAt)}</span>}
+                </div>
+              )}
+            </div>
+          </Card>
+
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
 
             {/* Apify — one card per subscription. The ACTIVE one is what scans burn; "Use this
@@ -183,27 +209,6 @@ export default function UsagePage() {
               )}
             </SectionCard>
 
-            {/* AI extraction — refill = Anthropic console billing (buy API credits directly) */}
-            <SectionCard icon={FileScan} title="AI extraction (Claude)"
-              action={<RefillBtn href={REFILL.anthropic} label="Log in & add credits" />}>
-              {data.ai ? (
-                <div className="space-y-1 text-xs lg:text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-1.5"><Dot ok={true} /> last scan run</span>
-                    <span className="font-bold">{money(data.ai.lastRunCostUsd, 4)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <CopyEmail email={data.ai.email} />
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {data.ai.tokensIn.toLocaleString()} in / {data.ai.tokensOut.toLocaleString()} out · OCR-only mode (USE_AI=0) keeps this ≈ $0
-                  </p>
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground">No scan-status.json yet — run a scan first.</p>
-              )}
-            </SectionCard>
-
             {/* Supabase */}
             <SectionCard icon={Database} title="Supabase (lead tables)">
               <div className="space-y-1.5 text-xs lg:text-sm">
@@ -230,36 +235,19 @@ export default function UsagePage() {
                   <span className="shrink-0 text-[11px] text-muted-foreground">primary</span>
                 </div>
                 {(data.telegram?.receivers || []).map((r: any) => (
-                  <div key={r.label} className="flex items-center justify-between gap-2">
+                  <div key={r.label} className="flex items-start justify-between gap-2">
                     <span className="flex min-w-0 items-center gap-1.5"><Dot ok={true} /> <span className="truncate">{r.label}</span></span>
-                    <span className="shrink-0 text-[11px] text-muted-foreground">receiver</span>
+                    <span className="shrink-0 text-right text-[11px] text-muted-foreground">
+                      {r.counties && r.counties.length ? r.counties.join(", ") : "all counties"}
+                    </span>
                   </div>
                 ))}
-                <p className="text-[11px] text-muted-foreground">{data.telegram?.notifiedLeads ?? "?"} leads reported all-time · free</p>
+                <p className="text-[11px] text-muted-foreground">Watching by county · {data.telegram?.notifiedLeads ?? "?"} leads reported all-time · free</p>
               </div>
             </SectionCard>
 
-            {/* Scan health */}
-            <SectionCard icon={Activity} title="Scan health">
-              {data.scan ? (
-                <div className="space-y-1 text-xs lg:text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-1.5"><Dot ok={!data.scan.running || undefined} /> {data.scan.running ? "RUNNING" : "idle"}</span>
-                    <span className="shrink-0 text-[11px] text-muted-foreground">{data.scan.county}</span>
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {data.scan.done ?? "?"}/{data.scan.total ?? "?"} cases · {data.scan.knock ?? 0} knock · {data.scan.review ?? 0} review
-                    {data.scan.finishedAt && <> · {ago(data.scan.finishedAt)}</>}
-                  </p>
-                  {data.cronLog && (
-                    <p className="text-[11px] text-muted-foreground">log {data.cronLog.sizeMb} MB · written {ago(data.cronLog.modifiedAt)}</p>
-                  )}
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground">No scan yet.</p>
-              )}
-            </SectionCard>
           </div>
+          </>
         )}
       </main>
     </div>
