@@ -80,6 +80,16 @@ if (!auctionDays.includes(new Date().getDay())) {
   } catch (e) { log(`auction scan FAILED for ${county}:`, e.code === 'ETIMEDOUT' ? `TIMED OUT after ${env.AUCTION_TIMEOUT_MIN || 120} min (killed)` : String(e.message).slice(0, 100)); }
 }
 
+// Appraiser fallback — fills in anything Zillow couldn't value. Free, no cap, no bot wall,
+// so it runs every day regardless of Apify state. It only touches leads with zillow_value
+// IS NULL and writes value_source='ocpa', so a real Zillow comp is never overwritten.
+// The number it produces is a FLOOR (~15% under Zillow, measured) — good enough to CONFIRM
+// a door-knock, never used to reject one. See scripts/value-ocpa.mjs for the full rationale.
+try {
+  log('=== appraiser valuation fallback (free) ===');
+  execFileSync(process.execPath, [join(__dirname, 'value-ocpa.mjs')], { stdio: 'inherit', timeout: 20 * 60_000, killSignal: 'SIGKILL', env: process.env });
+} catch (e) { log('ocpa valuation failed:', String(e.message).slice(0, 100)); }
+
 // Combined daily summary across all counties → scan-status.json (drives the dashboard "daily update" popup).
 try {
   const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });

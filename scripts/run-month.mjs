@@ -194,18 +194,28 @@ setStatus({running:true,done:0,total:0,startedAt:new Date().toISOString(),worker
 // ---- Supabase: the ONLY persistence (no local PDFs/JSON). Stores data + the document links. ----
 const sb=createClient(env.NEXT_PUBLIC_SUPABASE_URL,env.SUPABASE_SERVICE_ROLE_KEY,{auth:{persistSession:false}});
 async function upsertLead(rec){
-  try{ await sb.from('foreclosure_leads').upsert({
+  const row={
     case_number:rec.caseNumber, county:env.COUNTY||'Orange',
     plaintiff:rec.plaintiff||null, defendant:rec.defendant||null, type:rec.type||null,
     property_address:rec.propertyAddress||null,
     principal_due:rec.principalDue??null, interest_owed:rec.interestOwed??null,
     total_owed:rec.totalOwed??null, owed_with_buffer:rec.owedWithBuffer??null,
-    zillow_value:rec.zillowValue??null, spread:rec.spread??null, flagged:rec.flagged??null,
     review_status:rec.reviewStatus||null, review_reason:rec.reviewReason||null,
     complaint_url:rec.complaintUrl||null, value_url:rec.valueUrl||null, docket_url:rec.docketUrl||null,
     filing_date:rec.filingDate||null,
     scan_month:MONTH, scan_year:YEAR, updated_at:new Date().toISOString()
-  },{onConflict:'case_number'}); }catch(e){ log('supabase upsert err',String(e.message).slice(0,40)); }
+  };
+  // NEVER write null over an existing valuation. This upsert used to send
+  // `zillow_value: rec.zillowValue ?? null` unconditionally, so any re-scan that couldn't
+  // value a property ERASED the value/spread/flag already stored for it — and the rolling
+  // window re-scans the same cases every day. Measured 2026-07-26: a single re-run dropped
+  // `valued` 130→128 and `flagged` 48→45. It also silently destroyed appraiser-sourced
+  // values (value-ocpa.mjs). Only send these keys when this run actually produced them.
+  if(rec.zillowValue!=null) row.zillow_value=rec.zillowValue;
+  if(rec.spread!=null)      row.spread=rec.spread;
+  if(rec.flagged!=null)     row.flagged=rec.flagged;
+  try{ await sb.from('foreclosure_leads').upsert(row,{onConflict:'case_number'}); }
+  catch(e){ log('supabase upsert err',String(e.message).slice(0,40)); }
 }
 
 const tStart=Date.now();
@@ -232,6 +242,50 @@ const MAX=parseInt(process.env.MAX||'0',10); if(MAX) list=list.slice(0,MAX);
 // ONLY_CASES=<csv> → process only these case numbers (targeted doc backfill); skip the rest.
 const ONLY=(process.env.ONLY_CASES||'').split(',').map(s=>s.trim()).filter(Boolean);
 if(ONLY.length){ list=list.filter(x=>ONLY.includes(x.caseNumber)); log(`ONLY_CASES → ${list.length} target(s)`); }
+
+// ── Skip cases we've already finished ───────────────────────────────────────────
+// The rolling DAILY_DAYS window exists so a missed/failed run self-heals and new
+// filings get picked up — that part is cheap (one search). What was expensive was
+// re-doing the PER-CASE work (re-click, re-download both PDFs, re-OCR) for cases
+// already complete. Measured 2026-07-26: a 149-case run added ZERO new rows and
+// burned $0.154 of CapSolver re-processing cases already in the database. That is
+// the #1 finding of the 07-14 cost audit, confirmed live.
+//
+// Is the re-work buying anything? Completion rate by filing age says barely:
+//   0-2 days 63% · 3-7 days 67% · 8-30 days 68% · 30+ days 57%
+// A case that won't parse on day one mostly never parses. So: a case that is DONE
+// (status auto + address + owed) is never touched again. A case that is INCOMPLETE
+// still gets retried — documents genuinely do post late — but only RETRY_DAYS from
+// its filing date, after which we stop paying to re-read a docket that isn't coming.
+// RESCAN_ALL=1 forces the old behaviour for a full rebuild.
+if(process.env.RESCAN_ALL!=='1' && list.length){
+  const RETRY_DAYS=parseInt(process.env.RETRY_DAYS||'14',10);
+  try{
+    const {data:known}=await sb.from('foreclosure_leads')
+      .select('case_number, review_status, property_address, owed_with_buffer, filing_date, scanned_at')
+      .in('case_number', list.map(x=>x.caseNumber));
+    const by=new Map((known||[]).map(r=>[r.case_number,r]));
+    const before=list.length;
+    let done=0, stale=0;
+    list=list.filter(x=>{
+      const r=by.get(x.caseNumber);
+      if(!r) return true;                                             // never seen → scrape it
+      const complete = r.review_status==='auto' && r.property_address && r.owed_with_buffer!=null;
+      if(complete){ done++; return false; }                           // finished → never redo
+      // Age the retry window off filing_date when we have it, else off when we FIRST SAW the
+      // case. Without the fallback this rule is nearly inert: 120 of 153 rows in a live window
+      // had no filing_date, so they could never age out and were retried forever. With it,
+      // a 14-day window skips 54% of per-case work (7 days would skip 84%).
+      const basis = r.filing_date || r.scanned_at;
+      if(basis){
+        const age=(Date.now()-new Date(basis).getTime())/86400000;
+        if(age>RETRY_DAYS){ stale++; return false; }
+      }
+      return true;
+    });
+    log(`skip: ${done} already complete, ${stale} past ${RETRY_DAYS}d retry window → ${list.length}/${before} to process`);
+  }catch(e){ log('skip-check failed, processing all:',String(e.message).slice(0,60)); }
+}
 total=list.length; pushStatus(); log(`CA targets: ${total}`);
 
 // 2) per-case workers — each holds a persistent session and RE-SEARCHES before clicking each case

@@ -21,13 +21,40 @@ const toSheetRow = r => ({ caseNumber: r.case_number, plaintiff: r.plaintiff, de
 // Local Camoufox Zillow fallback (free) — keeps valuations flowing when the Apify plan is over its
 // monthly cap (e.g. 2026-07: Dyer's free $5/mo burned out until Aug 7). Same flow as run-month.mjs.
 const money = s => { const m = (s == null ? '' : String(s)).replace(/[^0-9.]/g, ''); return m ? parseFloat(m) : null; };
+
+// Optional residential proxy for the Zillow leg ONLY.
+//
+// WHY: Zillow (PerimeterX/HUMAN) scores TWO things — browser fingerprint AND IP reputation.
+// Camoufox beats the fingerprint check; nothing beats the IP check except a different IP.
+// Measured on this VPS 2026-07-26: 1/36 valued (2.8%) — the box is a Hostinger datacenter
+// range, and datacenter IPs are rejected on sight. The SAME browser sails through
+// RealForeclose, which only checks fingerprint + geo. So this is not a browser problem.
+//
+// Set ZILLOW_PROXY to route just this request through a residential exit:
+//   ZILLOW_PROXY=http://user:pass@gate.provider.com:7777
+// Unset = current behaviour (direct, works from a residential machine like the Mac).
+// Billed by bandwidth, so blocking images/media below keeps a valuation to a few hundred KB.
+function proxyOpt() {
+  const raw = process.env.ZILLOW_PROXY || '';
+  if (!raw) return {};
+  try {
+    const u = new URL(raw);
+    return { proxy: { server: `${u.protocol}//${u.host}`, username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) } };
+  } catch { console.log('ZILLOW_PROXY is not a valid URL — ignoring'); return {}; }
+}
+
 async function zillowLocal(a) {
   let zctx = null;
   try {
     const { Camoufox } = await import('camoufox-js');
     const slug = String(a).replace(/\bAlt\.?\s*/ig, 'Alternate ').replace(/[#.]/g, '').replace(/,/g, '').replace(/\s+/g, '-').replace(/-+/g, '-');
-    zctx = await Camoufox({ headless: true, user_data_dir: `/tmp/camou-vwa-zillow-${process.pid}-${Math.random().toString(36).slice(2, 7)}` });
+    zctx = await Camoufox({ headless: true, ...proxyOpt(), user_data_dir: `/tmp/camou-vwa-zillow-${process.pid}-${Math.random().toString(36).slice(2, 7)}` });
     const p = zctx.pages()[0] || await zctx.newPage();
+    // A residential proxy bills by the gigabyte and a Zillow listing page pulls megabytes of
+    // photos we never read. Drop images/media/fonts — the Zestimate is in the HTML.
+    if (process.env.ZILLOW_PROXY) {
+      await p.route('**/*', route => ['image', 'media', 'font'].includes(route.request().resourceType()) ? route.abort() : route.continue());
+    }
     await p.goto(`https://www.zillow.com/homes/${encodeURIComponent(slug)}_rb/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     await p.waitForTimeout(4000);
     const h = await p.content();
@@ -58,13 +85,25 @@ const rows = lqData || [];
 console.log(`valuing ${rows.length} addresses via Apify…`);
 
 const valuedSet = new Set();
-// BOTH Apify subscriptions, active first — if the active account is maxed out ("Monthly usage hard
-// limit exceeded"), the run automatically alternates to the other account. Only when BOTH are dry
-// does valuation fall through to local Zillow + the Telegram low-balance alert.
+// Apify accounts tried in order. Each free account gets $5/month on its OWN cycle, and the
+// cycles don't line up (successful_expertise resets 08-25, yummy_quench 08-10, Primeinvest
+// 08-07), so a pool of accounts means there is nearly always one with headroom. When an
+// account reports its hard cap the run alternates to the next immediately; only when ALL are
+// dry does valuation fall through to local Zillow + the appraiser floor.
+//
+// Add accounts as APIFY_API_TOKEN_2, _3, _4 … or comma-separate them in APIFY_API_TOKENS.
+// APIFY_API_TOKEN_DYER is still honoured so older .env files keep working.
 const APIFY_TOKENS = [
-  { label: 'active', token: APIFY },
-  { label: 'standby', token: env.APIFY_API_TOKEN_DYER },
-].filter(t => t.token && String(t.token).startsWith('apify_api_'));
+  { label: 'primary', token: APIFY },
+  ...String(env.APIFY_API_TOKENS || '').split(',').map((t, i) => ({ label: `list${i + 1}`, token: t.trim() })),
+  ...Array.from({ length: 8 }, (_, i) => ({ label: `acct${i + 2}`, token: env[`APIFY_API_TOKEN_${i + 2}`] })),
+  { label: 'dyer', token: env.APIFY_API_TOKEN_DYER },
+]
+  .filter(t => t.token && String(t.token).trim().startsWith('apify_api_'))
+  .map(t => ({ ...t, token: String(t.token).trim() }))
+  // De-dupe so the same key pasted into two slots isn't retried as if it were a second account.
+  .filter((t, i, a) => a.findIndex(x => x.token === t.token) === i);
+if (APIFY_TOKENS.length) console.log(`apify: ${APIFY_TOKENS.length} account(s) in rotation`);
 let APIFY_USED = null; // which token actually ran (used for status/items fetches below)
 if (rows.length && APIFY_TOKENS.length) {
   const addresses = rows.map(r => r.property_address);
@@ -76,7 +115,9 @@ if (rows.length && APIFY_TOKENS.length) {
       if (attempt) await sleep(15000);
       const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${acct.token}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json()).catch(e => ({ error: { message: String(e.message) } }));
       runId = start.data?.id; datasetId = start.data?.defaultDatasetId;
-      if (datasetId) { APIFY_USED = acct.token; if (acct.label !== 'active') console.log('  apify: active account maxed — alternated to the standby account'); break; }
+      // Only report an alternation when we actually fell past the first account — comparing
+      // against a hard-coded label silently mis-reports every run once labels change.
+      if (datasetId) { APIFY_USED = acct.token; if (acct.token !== APIFY_TOKENS[0].token) console.log(`  apify: earlier account(s) capped — running on '${acct.label}'`); break; }
       const msg = JSON.stringify(start.error || start).slice(0, 120);
       console.log(`  apify start failed (${acct.label}, attempt ${attempt + 1}/2):`, msg);
       if (/limit exceeded|platform-feature-disabled/i.test(msg)) break; // hard cap → try the other account
