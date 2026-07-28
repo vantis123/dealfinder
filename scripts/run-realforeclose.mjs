@@ -427,61 +427,98 @@ if (ENRICH) {
   const targets = (ENRICH_MAX ? all.slice(0, ENRICH_MAX) : all);
   log(`enriching ${targets.length} case(s) via clerk/comptroller…`);
   const { Camoufox } = await import('camoufox-js');
-  const ectx = await Camoufox({ headless: HEADLESS, user_data_dir: join(ROOT, '.rf-session', `${COUNTY}-enrich-cf`) });
-  let epage = ectx.pages()[0] || await ectx.newPage();
+  const timed = (p, ms, label) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${label || 'op'} timed out after ${ms}ms`)), ms)),
+  ]);
+  const newEnrichPage = async (ctx) => {
+    const p = await ctx.newPage();
+    p.on('dialog', async d => { await d.accept().catch(() => {}); });
+    return p;
+  };
+  let ectx = await Camoufox({ headless: HEADLESS, user_data_dir: join(ROOT, '.rf-session', `${COUNTY}-enrich-cf`) });
+  let epage = ectx.pages()[0] || await newEnrichPage(ectx);
   epage.on('dialog', async d => { await d.accept().catch(() => {}); });
   const state = {};                                                // shared across Orange cases -> one captcha solve/run
   const PACE = parseInt(process.env.ENRICH_PACE_MS || '3000', 10);  // gentle gap between cases (gov sites rate-limit bursts)
   const CASE_TIMEOUT_MS = parseInt(process.env.ENRICH_CASE_TIMEOUT_MS || '90000', 10);
   const BUDGET_MS = parseInt(process.env.ENRICH_BUDGET_MIN || '45', 10) * 60_000;
+  const RECOVERY_MS = parseInt(process.env.ENRICH_RECOVERY_TIMEOUT_MS || '10000', 10);
   const loopStart = Date.now();
-  let done = 0, docs = 0, miss = 0, timeouts = 0;
+  let done = 0, docs = 0, miss = 0, timeouts = 0, realFailures = 0;   // realFailures never resets (miss does, on any success) — the true count of actual breakage this run
   for (const it of targets) {
     if (Date.now() - loopStart > BUDGET_MS) {
       log(`enrichment: hit ${Math.round(BUDGET_MS / 60000)}min time budget after ${done}/${targets.length} — stopping gracefully (rest picked up next run)`);
       break;
     }
     try {
-      const timed = (p, ms) => Promise.race([
-        p,
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`case timed out after ${ms}ms`)), ms)),
-      ]);
       const r = await timed(
         enrichAuctionCase({ page: epage, county: COUNTY, caseNumber: it.caseNumber, fjDocUrl: it.fjDocUrl, capKey: CAP, sb, owed: extractOwed, log, state }),
-        CASE_TIMEOUT_MS,
+        CASE_TIMEOUT_MS, 'case',
       );
       Object.assign(it, r);
       if (r.value_sheet_url || r.final_judgment_url) { docs++; miss = 0; it.enriched_at = new Date().toISOString(); }
-      else if (r.failed || (!r.docket_url && !r.sale_date)) { miss++; }   // real failure OR no record found at all
+      // Orange: `docket_url`/`sale_date` are legitimately null for a case with no Final Judgment posted
+      // yet (healthy, common, not a miss) — `r.failed` is the only accurate signal there (gate-2 F3).
+      // Other counties (clerk lookup): no docket_url/sale_date means the case genuinely wasn't found.
+      else if (r.failed || (COUNTY !== 'orange' && !r.docket_url && !r.sale_date)) { miss++; realFailures++; }
       done++;
       if (done % 10 === 0) log(`  enriched ${done}/${targets.length} (${docs} docs saved)`);
       // circuit breaker: if the records site starts refusing everything (rate-limit), stop hammering —
       // the rest get picked up on the next run rather than deepening the block.
       if (miss >= 6) { log(`enrichment: ${miss} consecutive misses — records site likely throttling, stopping this run`); break; }
     } catch (e) {
-      timeouts++; miss++; done++;
+      timeouts++; miss++; realFailures++; done++;
       const isTimeout = /timed out/i.test(e.message);
       log(`enrich err ${it.caseNumber}: ${String(e.message).slice(0, 80)}${isTimeout ? ' — case SKIPPED, moving on' : ''}`);
       // Promise.race doesn't cancel the loser — the abandoned page.goto/captcha-solve for the timed-out
       // case is still running in the background on `epage`. Recreate the page so it can't collide with
       // the NEXT case's navigation on the same shared page object (stale state -> cascading wrong reads).
+      //
+      // 2026-07-28 fix (gate-2 F2): epage.close() has no built-in timeout — a TRULY hung page (not just
+      // a slow request, an actually wedged renderer/network stack) can block close() forever too, which
+      // would defeat the 90s per-case timeout and land right back at the 120min SIGKILL one layer deeper.
+      // Race the page-level recovery against a short RECOVERY_MS budget; if even THAT hangs, give up on
+      // the page and tear down + recreate the whole Camoufox context instead (a fresh process, guaranteed
+      // to not be wedged the same way).
       if (isTimeout) {
-        try { await epage.close({ runBeforeUnload: false }); } catch (e2) {}
-        try { epage = await ectx.newPage(); epage.on('dialog', async d => { await d.accept().catch(() => {}); }); }
-        catch (e2) { log(`enrichment: failed to recreate page after timeout — ${String(e2.message).slice(0, 80)}`); }
+        try {
+          await timed((async () => {
+            try { await epage.close({ runBeforeUnload: false }); } catch (e2) {}
+            epage = await newEnrichPage(ectx);
+          })(), RECOVERY_MS, 'page recovery');
+        } catch (e2) {
+          log(`enrichment: page recovery hung (${String(e2.message).slice(0, 60)}) — recreating the whole browser context`);
+          try { await timed(ectx.close(), RECOVERY_MS, 'context close'); } catch (e3) { log(`enrichment: context close also hung, abandoning it — ${String(e3.message).slice(0, 60)}`); }
+          try {
+            ectx = await Camoufox({ headless: HEADLESS, user_data_dir: join(ROOT, '.rf-session', `${COUNTY}-enrich-cf`) });
+            epage = ectx.pages()[0] || await newEnrichPage(ectx);
+          } catch (e3) {
+            log(`enrichment: FAILED to recreate browser context — stopping enrichment (rest picked up next run): ${String(e3.message).slice(0, 100)}`);
+            break;
+          }
+        }
       }
       if (miss >= 6) { log(`enrichment: ${miss} consecutive misses — records site likely throttling, stopping this run`); break; }
     }
     await sleep(PACE + Math.floor(PACE * 0.4 * (done % 3) / 3));   // small jitter
   }
-  await ectx.close();
+  try { await timed(ectx.close(), RECOVERY_MS, 'final context close'); } catch (e) { log(`enrichment: final context close hung, abandoning it — ${String(e.message).slice(0, 60)}`); }
   log(`enrichment done: ${docs}/${targets.length} docs saved${timeouts ? ` (${timeouts} case timeout(s))` : ''}`);
-  // Loud + actionable: a run that had real targets but saved ZERO docs is a degraded run, not a
-  // silent success — surface it as a process failure so daily.mjs's existing execFileSync catch
-  // records it into scan-status.json errors[] (2026-07-28: this used to report ok:true with 0/N saved).
-  if (targets.length > 0 && docs === 0) {
-    log(`enrichment DEGRADED: 0/${targets.length} docs saved for ${COUNTY} — flagging run as failed`);
+  // Loud + actionable: a run that had real targets, saved ZERO docs, AND actually observed real
+  // failures (captcha wall, timeouts, case-not-found) is degraded — surface it as a process failure
+  // so daily.mjs's existing execFileSync catch records it into scan-status.json errors[]
+  // (2026-07-28: this used to report ok:true with 0/N saved with no visibility at all).
+  //
+  // gate-2 F3: requiring realFailures > 0 (not just docs === 0) matters — a run where every target
+  // is legitimately pre-judgment (no Final Judgment posted yet, e.g. Orange with an early-stage
+  // batch) correctly saves 0 docs with ZERO real failures, and must NOT be flagged DEGRADED. That
+  // would be the same false-red over-correction as the original silent-green bug, just inverted.
+  if (targets.length > 0 && docs === 0 && realFailures > 0) {
+    log(`enrichment DEGRADED: 0/${targets.length} docs saved for ${COUNTY} (${realFailures} real failure(s)) — flagging run as failed`);
     process.exitCode = 2;
+  } else if (targets.length > 0 && docs === 0) {
+    log(`enrichment: 0/${targets.length} docs saved for ${COUNTY} but no real failures observed — likely just no cases at judgment yet, not flagging as degraded`);
   }
 }
 
