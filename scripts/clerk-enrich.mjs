@@ -97,12 +97,22 @@ export async function enrichCaseFromClerk({ page, county, caseNumber, sb, owed, 
       if (valuRow) {
         const buf = await fetchDoc(dp, cfg, valuRow.doc);
         if (buf) {
-          out.value_sheet_url = await saveDocToStorage(sb, caseNumber, 'value-sheet', buf) || null;
+          out.value_sheet_url = await saveDocToStorage(sb, caseNumber, 'value-sheet', buf, log) || null;
           if (owed) { const f = join(tmpdir(), `auc-val-${caseNumber.replace(/[^A-Za-z0-9]/g, '_')}.pdf`); try { writeFileSync(f, buf); const o = await owed(f); out.unpaid_principal = o.principalDue ?? null; out.interest_owed = o.interestOwed ?? null; } catch (e) {} finally { try { unlinkSync(f); } catch (e) {} } }
-          log(`clerk: ${caseNumber} value sheet saved (${buf.length}b, principal=${out.unpaid_principal})`);
+          // Only claim "saved" when saveDocToStorage actually returned a URL — it silently returned
+          // null on any Supabase Storage failure, so this log line used to fire on `buf` alone and
+          // lied about success (2026-07-28: every county logged "saved" while docs were 0/N stored).
+          if (out.value_sheet_url) log(`clerk: ${caseNumber} value sheet saved (${buf.length}b, principal=${out.unpaid_principal})`);
+          else log(`clerk: ${caseNumber} value sheet FETCHED (${buf.length}b) but STORAGE SAVE FAILED — see storage: line above`);
         }
       } else log(`clerk: ${caseNumber} no VALU docket row`);
-      if (nosRow) { const buf = await fetchDoc(dp, cfg, nosRow.doc); if (buf) out.notice_of_sale_url = await saveDocToStorage(sb, caseNumber, 'notice-of-sale', buf) || null; }
+      if (nosRow) {
+        const buf = await fetchDoc(dp, cfg, nosRow.doc);
+        if (buf) {
+          out.notice_of_sale_url = await saveDocToStorage(sb, caseNumber, 'notice-of-sale', buf, log) || null;
+          if (!out.notice_of_sale_url) log(`clerk: ${caseNumber} notice-of-sale FETCHED (${buf.length}b) but STORAGE SAVE FAILED`);
+        }
+      }
     } finally { await dp.close().catch(() => {}); }
   } catch (e) { log(`clerk enrich err ${caseNumber}:`, String(e.message).slice(0, 100)); }
   return out;
@@ -129,8 +139,13 @@ async function solveOccompt(capKey, log) {
 }
 
 export async function enrichOrangeFJ({ page, caseNumber, fjDocUrl, capKey, sb, owed, log = () => {}, state = {} }) {
-  const out = { sale_date: null, sale_location: null, value_sheet_url: null, notice_of_sale_url: null, final_judgment_url: null, unpaid_principal: null, interest_owed: null, docket_url: fjDocUrl || null };
-  if (!fjDocUrl) { log(`orange: ${caseNumber} no Final Judgment link on detail page`); return out; }
+  // `failed` is the SIGNAL the outer circuit breaker (run-realforeclose.mjs) uses to count consecutive
+  // misses. docket_url is set as soon as we know the FJ link exists (before we've fetched anything),
+  // so it was ALWAYS truthy here and the outer breaker's `!r.docket_url` check never fired for Orange
+  // — a captcha wall or dead servepdf link could burn through all 30 cases with zero early exit
+  // (2026-07-28: this is why the Orange auction scan ran the full 120 min and got killed).
+  const out = { sale_date: null, sale_location: null, value_sheet_url: null, notice_of_sale_url: null, final_judgment_url: null, unpaid_principal: null, interest_owed: null, docket_url: fjDocUrl || null, failed: false };
+  if (!fjDocUrl) { log(`orange: ${caseNumber} no Final Judgment link on detail page`); out.failed = true; return out; }
   try {
     // Up to 2 attempts — the occompt viewer/captcha is occasionally flaky; a retry recovers it.
     for (let attempt = 1; attempt <= 2 && !out.final_judgment_url; attempt++) {
@@ -164,14 +179,19 @@ export async function enrichOrangeFJ({ page, caseNumber, fjDocUrl, capKey, sb, o
       const r = await page.request.get(new URL(fileParam, OCCOMPT_HOST).href, { timeout: 40000 });
       const buf = Buffer.from(await r.body());
       if (buf.slice(0, 5).toString() !== '%PDF-') { log(`orange: ${caseNumber} servepdf not a PDF (attempt ${attempt})`); await sleep(1500); continue; }
-      out.final_judgment_url = await saveDocToStorage(sb, caseNumber, 'final-judgment', buf) || null;
+      out.final_judgment_url = await saveDocToStorage(sb, caseNumber, 'final-judgment', buf, log) || null;
       if (owed) {
         const f = join(tmpdir(), `auc-fj-${caseNumber.replace(/[^A-Za-z0-9]/g, '_')}.pdf`);
         try { writeFileSync(f, buf); const o = await owed(f); out.unpaid_principal = o.principalDue ?? null; out.interest_owed = o.interestOwed ?? null; } catch (e) {} finally { try { unlinkSync(f); } catch (e) {} }
       }
-      log(`orange: ${caseNumber} FJ saved (${buf.length}b, principal=${out.unpaid_principal})`);
+      // Only claim "saved" when the storage write actually succeeded — `buf` existing just means we
+      // fetched the PDF, not that Supabase Storage kept it (2026-07-28: this line used to fire
+      // unconditionally, so the log said "FJ saved" while the run-level count showed 0/30 docs saved).
+      if (out.final_judgment_url) log(`orange: ${caseNumber} FJ saved (${buf.length}b, principal=${out.unpaid_principal})`);
+      else log(`orange: ${caseNumber} FJ FETCHED (${buf.length}b) but STORAGE SAVE FAILED — see storage: line above`);
     }
-  } catch (e) { log(`orange enrich err ${caseNumber}:`, String(e.message).slice(0, 100)); }
+    if (!out.final_judgment_url) out.failed = true;   // exhausted both attempts with nothing usable -> real miss, feed the circuit breaker
+  } catch (e) { log(`orange enrich err ${caseNumber}:`, String(e.message).slice(0, 100)); out.failed = true; }
   return out;
 }
 
