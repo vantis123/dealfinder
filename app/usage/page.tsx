@@ -99,6 +99,14 @@ export default function UsagePage() {
 
   const capLow = (data?.capsolver?.balanceUsd ?? 99) < 2;
 
+  // Scan health state — ERROR (loud, red) beats STALE (amber) beats healthy (green/normal).
+  // "ok:false" or a populated errors[] = a real failure was recorded during the run.
+  // Stale = the last known timestamp (finishedAt on success, crashedAt on a hard crash) is >26h
+  // old, which almost always means the daily cron itself stopped firing or died before writing status.
+  const scanErrored = !!data?.scan && (data.scan.ok === false || (data.scan.errors?.length ?? 0) > 0);
+  const scanLastTs: string | null = data?.scan?.finishedAt || data?.scan?.crashedAt || null;
+  const scanStale = !!data?.scan && !!scanLastTs && (Date.now() - new Date(scanLastTs).getTime()) > 26 * 3600_000;
+
   return (
     <div className="min-h-screen">
       <Sidebar />
@@ -130,29 +138,61 @@ export default function UsagePage() {
           <p className="text-sm text-muted-foreground">Couldn&apos;t load usage — is the dev server running with the .env loaded?</p>
         ) : (
           <>
-          {/* Scan health — full-width band across the top */}
-          <Card className="mb-3 border-primary/25 bg-primary/5 p-4">
+          {/* Scan health — full-width band across the top. Loud red on a recorded failure/crash,
+              amber when the last status is too old to trust, otherwise the normal quiet state. */}
+          <Card
+            className={cn(
+              "mb-3 p-4",
+              scanErrored ? "border-red-500/50 bg-red-500/10" : scanStale ? "border-amber-500/50 bg-amber-500/10" : "border-primary/25 bg-primary/5"
+            )}
+          >
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                <Activity className="h-5 w-5 shrink-0 text-primary" />
+                <Activity className={cn("h-5 w-5 shrink-0", scanErrored ? "text-red-500" : scanStale ? "text-amber-500" : "text-primary")} />
                 <h2 className="text-sm font-bold">Scan health</h2>
                 {data.scan ? (
                   <span className="flex items-center gap-1.5 rounded-full bg-background/60 px-2 py-0.5 text-xs font-semibold">
-                    <Dot ok={!data.scan.running || undefined} /> {data.scan.running ? "RUNNING" : "idle"}
-                    <span className="text-muted-foreground">· {data.scan.county}</span>
+                    <Dot ok={scanErrored ? false : !data.scan.running || undefined} /> {data.scan.running ? "RUNNING" : "idle"}
+                    {data.scan.county && <span className="text-muted-foreground">· {data.scan.county}</span>}
                   </span>
                 ) : <span className="text-xs text-muted-foreground">No scan yet.</span>}
+                {scanErrored && (
+                  <span className="rounded-full bg-red-500 px-2 py-0.5 text-[11px] font-bold text-white">
+                    {data.scan.crashedAt ? "CRASHED" : "ERRORS"}
+                  </span>
+                )}
+                {!scanErrored && scanStale && (
+                  <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[11px] font-bold text-black">STALE</span>
+                )}
               </div>
               {data.scan && (
                 <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs lg:text-sm">
                   <span><b className="text-foreground">{data.scan.done ?? "?"}/{data.scan.total ?? "?"}</b> <span className="text-muted-foreground">cases</span></span>
                   <span><b className="text-emerald-400">{data.scan.knock ?? 0}</b> <span className="text-muted-foreground">knock</span></span>
                   <span><b className="text-amber-400">{data.scan.review ?? 0}</b> <span className="text-muted-foreground">review</span></span>
-                  {data.scan.finishedAt && <span className="text-muted-foreground">last run {ago(data.scan.finishedAt)}</span>}
+                  {scanLastTs && <span className="text-muted-foreground">last run {ago(scanLastTs)}</span>}
                   {data.cronLog && <span className="text-muted-foreground">log {data.cronLog.sizeMb} MB · {ago(data.cronLog.modifiedAt)}</span>}
                 </div>
               )}
             </div>
+
+            {scanErrored && (
+              <div className="mt-3 space-y-1 border-t border-red-500/20 pt-2">
+                {data.scan.error && (
+                  <p className="text-xs text-red-400"><b>crash:</b> {data.scan.error}</p>
+                )}
+                {(data.scan.errors || []).map((err: any, i: number) => (
+                  <p key={i} className="truncate text-xs text-red-400">
+                    <b>{err.stage}</b>{err.county ? ` (${err.county})` : ""}: {err.message}
+                  </p>
+                ))}
+              </div>
+            )}
+            {!scanErrored && scanStale && (
+              <p className="mt-2 border-t border-amber-500/20 pt-2 text-xs text-amber-400">
+                STALE — last run {ago(scanLastTs)}, scan may have crashed before writing status.
+              </p>
+            )}
           </Card>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
