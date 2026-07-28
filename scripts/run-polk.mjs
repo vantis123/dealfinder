@@ -247,7 +247,7 @@ try {
         let cmpFile = null;
         if (cmp) {
           const buf = await downloadDoc(p, cmp.token, cmp.seq);
-          if (buf) { cmpFile = join(tmpdir(), `polk-c-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(cmpFile, buf); const fd = filingDatePdf(cmpFile); if (fd) rec.filingDate = fd; rec.complaintUrl = await saveDocToStorage(sb, rec.caseNumber, 'complaint', buf) || null; }
+          if (buf) { cmpFile = join(tmpdir(), `polk-c-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(cmpFile, buf); const fd = filingDatePdf(cmpFile); if (fd) rec.filingDate = fd; rec.complaintUrl = await saveDocToStorage(sb, rec.caseNumber, 'complaint', buf, log) || null; }
         }
         // ADDRESS: Lis Pendens is 1 page, always public, and (by FL law) carries the legal description +
         // "Also known as: <street address>" — the reliable, cheap address source. Fall back to the complaint.
@@ -260,7 +260,7 @@ try {
         // VALUE OF REAL PROPERTY → owed (principal/interest) + save to storage (deliverable).
         if (val) {
           const buf = await downloadDoc(p, val.token, val.seq);
-          if (buf) { const f = join(tmpdir(), `polk-v-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, rec.caseNumber, 'value', buf) || null; }
+          if (buf) { const f = join(tmpdir(), `polk-v-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, rec.caseNumber, 'value', buf, log) || null; }
         }
         const o = (rec.principalDue || 0) + (rec.interestOwed || 0); rec.totalOwed = o || null; rec.owedWithBuffer = o ? o + 10000 : null;
         if (!rec.complaintUrl) { rec.reviewStatus = 'manual_review'; rec.reviewReason = 'no_complaint'; }

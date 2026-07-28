@@ -319,8 +319,8 @@ async function worker(slot){
         // the permanent URL. Fall back to the (expiring) county link only if the upload fails.
         const srcComplaint=info.complaint||null, srcValue=info.value||null;
         rec.complaintUrl=null; rec.valueUrl=null;
-        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp, env.COUNTY); rec.filingDate=filingDate(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
-        if(srcValue){ const tmp=`/tmp/df-val-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcValue); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); const v=await owed(tmp); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; rec.valueUrl=await saveDocToStorage(sb,rec.caseNumber,'value',buf)||srcValue;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
+        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp, env.COUNTY); rec.filingDate=filingDate(tmp); rec.complaintUrl=await saveDocToStorage(sb, rec.caseNumber, 'complaint', buf, log)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
+        if(srcValue){ const tmp=`/tmp/df-val-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcValue); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); const v=await owed(tmp); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; rec.valueUrl=await saveDocToStorage(sb, rec.caseNumber, 'value', buf, log)||srcValue;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
       }catch(e){ rec.reviewReason='err:'+String(e.message).slice(0,24); }
       rec.complaintX=!rec.complaintUrl; rec.valueX=!rec.valueUrl;
       const o=(rec.principalDue||0)+(rec.interestOwed||0); rec.totalOwed=o||null; rec.owedWithBuffer=o?o+10000:null;

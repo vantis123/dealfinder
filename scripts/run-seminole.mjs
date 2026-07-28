@@ -217,9 +217,9 @@ try {
         // Download → extract → SAVE the PDF to Supabase Storage (the doc_view2 token is session-bound), store
         // the permanent URL; fall back to the viewer link only if the upload fails.
         const cmp = await fetchDoc(p, d.complaint);
-        if (cmp) { const f = join(tmpdir(), `sem-c-${c.num}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', cmp) || d.complaint; }
+        if (cmp) { const f = join(tmpdir(), `sem-c-${c.num}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', cmp, log) || d.complaint; }
         const val = await fetchDoc(p, d.value);
-        if (val) { const f = join(tmpdir(), `sem-v-${c.num}.pdf`); writeFileSync(f, val); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.num, 'value', val) || d.value; }
+        if (val) { const f = join(tmpdir(), `sem-v-${c.num}.pdf`); writeFileSync(f, val); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.num, 'value', val, log) || d.value; }
         const o = (rec.principalDue || 0) + (rec.interestOwed || 0); rec.totalOwed = o || null; rec.owedWithBuffer = o ? o + 10000 : null;
         if (!rec.propertyAddress) { rec.reviewStatus = 'manual_review'; rec.reviewReason = 'no_address'; }
       }

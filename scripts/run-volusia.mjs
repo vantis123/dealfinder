@@ -249,13 +249,13 @@ try {
           const cmpId = await docIdForType(p, 'complaint\\s*/\\s*petition to foreclose');
           if (cmpId) {
             const cmp = await fetchDocByDocId(ctx, cmpId);
-            if (cmp) { const f = join(tmpdir(), `vol-c-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); const fd = filingDatePdf(f); if (fd) rec.filingDate = fd; try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.caseNumber, 'complaint', cmp) || null; }
+            if (cmp) { const f = join(tmpdir(), `vol-c-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); const fd = filingDatePdf(f); if (fd) rec.filingDate = fd; try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.caseNumber, 'complaint', cmp, log) || null; }
           }
           await sleep(700);
           const valId = await docIdForType(p, '^\\s*worksheet\\s*$|value of real property');
           if (valId) {
             const val = await fetchDocByDocId(ctx, valId);
-            if (val) { const f = join(tmpdir(), `vol-v-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, val); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.caseNumber, 'value', val) || null; }
+            if (val) { const f = join(tmpdir(), `vol-v-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, val); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.caseNumber, 'value', val, log) || null; }
           }
           const o = (rec.principalDue || 0) + (rec.interestOwed || 0); rec.totalOwed = o || null; rec.owedWithBuffer = o ? o + 10000 : null;
           if (!rec.complaintUrl) { rec.reviewStatus = 'manual_review'; rec.reviewReason = 'no_complaint'; }

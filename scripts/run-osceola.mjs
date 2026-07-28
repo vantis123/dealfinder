@@ -245,9 +245,9 @@ try {
         const pick = re => info.docs.find(d => re.test(d.label));
         const cmpDoc = info.docs.filter(d => /complaint/i.test(d.label)).sort((a, b) => (/foreclos/i.test(b.label) ? 1 : 0) - (/foreclos/i.test(a.label) ? 1 : 0))[0];
         const valDoc = pick(/value of real property/i);
-        if (cmpDoc) { const buf = await downloadDoc(p, cmpDoc.cid, cmpDoc.digest); if (buf) { const f = join(tmpdir(), `osc-c-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); rec.propertyAddress = await addr(f); rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.caseNumber, 'complaint', buf) || null; } }
+        if (cmpDoc) { const buf = await downloadDoc(p, cmpDoc.cid, cmpDoc.digest); if (buf) { const f = join(tmpdir(), `osc-c-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); rec.propertyAddress = await addr(f); rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.caseNumber, 'complaint', buf, log) || null; } }
         await sleep(500);
-        if (valDoc) { const buf = await downloadDoc(p, valDoc.cid, valDoc.digest); if (buf) { const f = join(tmpdir(), `osc-v-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.caseNumber, 'value', buf) || null; } }
+        if (valDoc) { const buf = await downloadDoc(p, valDoc.cid, valDoc.digest); if (buf) { const f = join(tmpdir(), `osc-v-${c.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.caseNumber, 'value', buf, log) || null; } }
         const o = (rec.principalDue || 0) + (rec.interestOwed || 0); rec.totalOwed = o || null; rec.owedWithBuffer = o ? o + 10000 : null;
         if (!rec.complaintUrl) { rec.reviewStatus = 'manual_review'; rec.reviewReason = 'no_complaint'; }
         else if (!rec.propertyAddress) { rec.reviewStatus = 'manual_review'; rec.reviewReason = 'no_address'; }

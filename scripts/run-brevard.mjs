@@ -233,12 +233,12 @@ try {
       else {
         if (d.complaint) {
           const buf = await fetchPdf(p, d.complaint);
-          if (buf) { const f = join(tmpdir(), `brev-c-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); rec.propertyAddress = await addr(f); if (!rec.filingDate) rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', buf) || null; }
+          if (buf) { const f = join(tmpdir(), `brev-c-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); rec.propertyAddress = await addr(f); if (!rec.filingDate) rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', buf, log) || null; }
         }
         await sleep(400);
         if (d.value) {
           const buf = await fetchPdf(p, d.value);
-          if (buf) { const f = join(tmpdir(), `brev-v-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.num, 'value', buf) || null; }
+          if (buf) { const f = join(tmpdir(), `brev-v-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.num, 'value', buf, log) || null; }
         }
         // fallback: defendant participant address if the complaint yielded nothing
         if (!rec.propertyAddress && d.defAddr && /\d/.test(d.defAddr)) rec.propertyAddress = d.defAddr;

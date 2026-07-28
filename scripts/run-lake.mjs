@@ -168,10 +168,10 @@ try {
         await p.evaluate(() => { const t = [...document.querySelectorAll('a,button,[ng-click]')].find(x => /^\s*dockets\s*$/i.test((x.innerText || '').trim())); if (t) t.click(); });
         await sleep(3000);
         const cmp = await fetchDocByDesc(p, /complaint/i);
-        if (cmp) { const f = join(tmpdir(), `lake-c-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', cmp) || null; }
+        if (cmp) { const f = join(tmpdir(), `lake-c-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, cmp); rec.propertyAddress = await addr(f); rec.filingDate = filingDate(f); try { unlinkSync(f); } catch (e) {} rec.complaintUrl = await saveDocToStorage(sb, c.num, 'complaint', cmp, log) || null; }
         await sleep(800);
         const val = await fetchDocByDesc(p, /value of real property/i);
-        if (val) { const f = join(tmpdir(), `lake-v-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, val); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.num, 'value', val) || null; }
+        if (val) { const f = join(tmpdir(), `lake-v-${c.num.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, val); const o = await owed(f); rec.principalDue = o.principalDue; rec.interestOwed = o.interestOwed; try { unlinkSync(f); } catch (e) {} rec.valueUrl = await saveDocToStorage(sb, c.num, 'value', val, log) || null; }
         const o = (rec.principalDue || 0) + (rec.interestOwed || 0); rec.totalOwed = o || null; rec.owedWithBuffer = o ? o + 10000 : null;
         if (!rec.complaintUrl) { rec.reviewStatus = 'manual_review'; rec.reviewReason = 'no_complaint'; }
         else if (!rec.propertyAddress) { rec.reviewStatus = 'manual_review'; rec.reviewReason = 'no_address'; }
