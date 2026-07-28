@@ -12,17 +12,31 @@ const BUCKET = 'foreclosure-docs';
 //  see notes in the audit — deferred to keep this change contained.)
 const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
-export async function saveDocToStorage(sb, caseNumber, kind, buffer) {
+// `log` is optional (callers that don't pass one keep the old silent behavior for back-compat),
+// but every real call site now passes the scraper's `log()` so a storage failure is LOUD instead
+// of a quiet null that upstream code could mistake for "nothing to save" (2026-07-28 bug: every
+// county's auction enrichment logged "saved" per-case, then reported 0/N docs saved overall —
+// saveDocToStorage was silently failing and nobody could see why).
+export async function saveDocToStorage(sb, caseNumber, kind, buffer, log = () => {}) {
   if (!sb || !buffer || !buffer.length) return null;
   const safe = String(caseNumber).replace(/[^A-Za-z0-9._-]/g, '_');
   const path = `${safe}/${kind}.pdf`;
   try {
     const { error } = await sb.storage.from(BUCKET).upload(path, buffer, { contentType: 'application/pdf', upsert: true });
-    if (error && !/exists|duplicate/i.test(error.message || '')) return null;
+    if (error && !/exists|duplicate/i.test(error.message || '')) {
+      log(`storage: ${caseNumber} ${kind} upload FAILED — ${String(error.message || error).slice(0, 160)}`);
+      return null;
+    }
     const { data, error: signErr } = await sb.storage.from(BUCKET).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
-    if (signErr) return null;
+    if (signErr) {
+      log(`storage: ${caseNumber} ${kind} uploaded but SIGN FAILED — ${String(signErr.message || signErr).slice(0, 160)}`);
+      return null;
+    }
     return data?.signedUrl || null;
-  } catch (e) { return null; }
+  } catch (e) {
+    log(`storage: ${caseNumber} ${kind} upload THREW — ${String(e?.message || e).slice(0, 160)}`);
+    return null;
+  }
 }
 
 // One-time: ensure the PRIVATE bucket exists (called from db-setup).
