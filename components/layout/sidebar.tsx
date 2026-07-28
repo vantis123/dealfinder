@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { Flame, Kanban, Gavel, CalendarClock, Laptop, Gauge, Menu, X } from "lucide-react";
+import { Flame, Kanban, Gavel, CalendarClock, Laptop, Gauge, Settings2, Menu, X } from "lucide-react";
 
 const navItems = [
   { href: "/new-deals", label: "New Deals", icon: Flame, highlight: true },
@@ -12,6 +12,7 @@ const navItems = [
   { href: "/foreclosures", label: "Foreclosure Leads", icon: Gavel },
   { href: "/auctions", label: "Auctions", icon: CalendarClock },
   { href: "/usage", label: "Usage", icon: Gauge },
+  { href: "/settings", label: "Settings", icon: Settings2 },
   { href: "/join", label: "Request a County", icon: Laptop },
 ];
 
