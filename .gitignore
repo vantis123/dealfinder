@@ -19,3 +19,4 @@ tsconfig.tsbuildinfo
 # internal ops/debug scripts (not product)
 scripts/railway-recon.mjs
 scripts/railway-buildlog.mjs
+.env.bak.*
