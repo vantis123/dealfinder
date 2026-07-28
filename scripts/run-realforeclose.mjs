@@ -414,32 +414,75 @@ for (const it of all) {
 
 // ---- ENRICH: pull the value sheet / final judgment doc + sale date + reinstatement $ per case ----
 // Seminole = clerk docket (free). Orange = Comptroller Final Judgment (CapSolver, one solve/run).
+//
+// 2026-07-28 fix (Orange auction scan hung 120min, killed): the captcha-gated Orange comptroller
+// site could take many minutes per case with nothing capping a SINGLE case, and Orange's circuit
+// breaker never fired because docket_url was always set before the fetch even started (see
+// clerk-enrich.mjs `failed` flag). Two independent guards now stop this from ever eating the outer
+// 120min execFileSync kill again:
+//   1. PER-CASE timeout (ENRICH_CASE_TIMEOUT_MS, default 90s) — a single wedged case can't stall the loop.
+//   2. WHOLE-LOOP time budget (ENRICH_BUDGET_MIN, default 45min) — enrichment self-stops with a loud
+//      log line well before the outer kill, instead of being SIGKILLed mid-case with no cleanup.
 if (ENRICH) {
   const targets = (ENRICH_MAX ? all.slice(0, ENRICH_MAX) : all);
   log(`enriching ${targets.length} case(s) via clerk/comptroller…`);
   const { Camoufox } = await import('camoufox-js');
   const ectx = await Camoufox({ headless: HEADLESS, user_data_dir: join(ROOT, '.rf-session', `${COUNTY}-enrich-cf`) });
-  const epage = ectx.pages()[0] || await ectx.newPage();
+  let epage = ectx.pages()[0] || await ectx.newPage();
   epage.on('dialog', async d => { await d.accept().catch(() => {}); });
   const state = {};                                                // shared across Orange cases -> one captcha solve/run
   const PACE = parseInt(process.env.ENRICH_PACE_MS || '3000', 10);  // gentle gap between cases (gov sites rate-limit bursts)
-  let done = 0, docs = 0, miss = 0;
+  const CASE_TIMEOUT_MS = parseInt(process.env.ENRICH_CASE_TIMEOUT_MS || '90000', 10);
+  const BUDGET_MS = parseInt(process.env.ENRICH_BUDGET_MIN || '45', 10) * 60_000;
+  const loopStart = Date.now();
+  let done = 0, docs = 0, miss = 0, timeouts = 0;
   for (const it of targets) {
+    if (Date.now() - loopStart > BUDGET_MS) {
+      log(`enrichment: hit ${Math.round(BUDGET_MS / 60000)}min time budget after ${done}/${targets.length} — stopping gracefully (rest picked up next run)`);
+      break;
+    }
     try {
-      const r = await enrichAuctionCase({ page: epage, county: COUNTY, caseNumber: it.caseNumber, fjDocUrl: it.fjDocUrl, capKey: CAP, sb, owed: extractOwed, log, state });
+      const timed = (p, ms) => Promise.race([
+        p,
+        new Promise((_, rej) => setTimeout(() => rej(new Error(`case timed out after ${ms}ms`)), ms)),
+      ]);
+      const r = await timed(
+        enrichAuctionCase({ page: epage, county: COUNTY, caseNumber: it.caseNumber, fjDocUrl: it.fjDocUrl, capKey: CAP, sb, owed: extractOwed, log, state }),
+        CASE_TIMEOUT_MS,
+      );
       Object.assign(it, r);
       if (r.value_sheet_url || r.final_judgment_url) { docs++; miss = 0; it.enriched_at = new Date().toISOString(); }
-      else if (!r.docket_url && !r.sale_date) { miss++; }          // no record found at all
+      else if (r.failed || (!r.docket_url && !r.sale_date)) { miss++; }   // real failure OR no record found at all
       done++;
       if (done % 10 === 0) log(`  enriched ${done}/${targets.length} (${docs} docs saved)`);
       // circuit breaker: if the records site starts refusing everything (rate-limit), stop hammering —
       // the rest get picked up on the next run rather than deepening the block.
       if (miss >= 6) { log(`enrichment: ${miss} consecutive misses — records site likely throttling, stopping this run`); break; }
-    } catch (e) { log('enrich err', it.caseNumber, String(e.message).slice(0, 80)); }
+    } catch (e) {
+      timeouts++; miss++; done++;
+      const isTimeout = /timed out/i.test(e.message);
+      log(`enrich err ${it.caseNumber}: ${String(e.message).slice(0, 80)}${isTimeout ? ' — case SKIPPED, moving on' : ''}`);
+      // Promise.race doesn't cancel the loser — the abandoned page.goto/captcha-solve for the timed-out
+      // case is still running in the background on `epage`. Recreate the page so it can't collide with
+      // the NEXT case's navigation on the same shared page object (stale state -> cascading wrong reads).
+      if (isTimeout) {
+        try { await epage.close({ runBeforeUnload: false }); } catch (e2) {}
+        try { epage = await ectx.newPage(); epage.on('dialog', async d => { await d.accept().catch(() => {}); }); }
+        catch (e2) { log(`enrichment: failed to recreate page after timeout — ${String(e2.message).slice(0, 80)}`); }
+      }
+      if (miss >= 6) { log(`enrichment: ${miss} consecutive misses — records site likely throttling, stopping this run`); break; }
+    }
     await sleep(PACE + Math.floor(PACE * 0.4 * (done % 3) / 3));   // small jitter
   }
   await ectx.close();
-  log(`enrichment done: ${docs}/${targets.length} docs saved`);
+  log(`enrichment done: ${docs}/${targets.length} docs saved${timeouts ? ` (${timeouts} case timeout(s))` : ''}`);
+  // Loud + actionable: a run that had real targets but saved ZERO docs is a degraded run, not a
+  // silent success — surface it as a process failure so daily.mjs's existing execFileSync catch
+  // records it into scan-status.json errors[] (2026-07-28: this used to report ok:true with 0/N saved).
+  if (targets.length > 0 && docs === 0) {
+    log(`enrichment DEGRADED: 0/${targets.length} docs saved for ${COUNTY} — flagging run as failed`);
+    process.exitCode = 2;
+  }
 }
 
 // ---- persist ----
