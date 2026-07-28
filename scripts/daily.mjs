@@ -119,19 +119,27 @@ try {
   } catch (e) { log('ocpa valuation failed:', String(e.message).slice(0, 100)); recordError('ocpa-valuation', null, e); }
 
   // Combined daily summary across all counties → scan-status.json (drives the dashboard "daily update" popup).
+  // F1 fix (2026-07-27, gate-2): counts default to null/0 and the Supabase query has its OWN try —
+  // the writeFileSync below is UNCONDITIONAL (runs whether the query succeeded or not) so a DB/creds
+  // hiccup (expired key, RLS, network) still produces a fresh ok:false status instead of leaving
+  // yesterday's stale-but-green scan-status.json in place (the exact silent-zero failure mode this
+  // whole change exists to kill).
+  let knock = null, review = null, notWorth = null, pipeline = null, total = null;
   try {
     const sb = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
-    const { data } = await sb.from('foreclosure_leads').select('flagged,review_status,spread').gte('updated_at', runStart);
-    let knock = 0, review = 0, notWorth = 0, pipeline = 0;
+    const { data, error } = await sb.from('foreclosure_leads').select('flagged,review_status,spread').gte('updated_at', runStart);
+    if (error) throw error;
+    knock = 0; review = 0; notWorth = 0; pipeline = 0;
     for (const r of data || []) { if (r.flagged) { knock++; pipeline += Number(r.spread) || 0; } else if (r.review_status === 'manual_review') review++; else notWorth++; }
-    const total = (data || []).length;
-    writeFileSync(join(ROOT, 'scan-status.json'), JSON.stringify({
-      running: false, county: ready.join(' + '), from: DATE_FROM, to: DATE_TO,
-      total, done: total, knock, review, notWorth, pipelineAdded: pipeline, daily: true, finishedAt: new Date().toISOString(),
-      ok: errors.length === 0, errors,
-    }, null, 2));
+    total = (data || []).length;
     log(`combined daily summary: ${knock} knock · ${review} review · ${notWorth} not-worth · $${Math.round(pipeline)} pipeline`);
   } catch (e) { log('combined summary failed:', String(e.message).slice(0, 80)); recordError('combined-summary', null, e); }
+
+  writeFileSync(join(ROOT, 'scan-status.json'), JSON.stringify({
+    running: false, county: ready.join(' + '), from: DATE_FROM, to: DATE_TO,
+    total, done: total, knock, review, notWorth, pipelineAdded: pipeline, daily: true, finishedAt: new Date().toISOString(),
+    ok: errors.length === 0, errors,
+  }, null, 2));
 
   // Auto-populate the CRM — refresh the unified `deals` spine (what the CRM reads) from both source tables.
   // (Phillip chose auto-flow: finds go all the way into the pipeline. Set AUTO_PROMOTE_CRM=0 to disable.)
