@@ -145,7 +145,12 @@ export async function enrichOrangeFJ({ page, caseNumber, fjDocUrl, capKey, sb, o
   // — a captcha wall or dead servepdf link could burn through all 30 cases with zero early exit
   // (2026-07-28: this is why the Orange auction scan ran the full 120 min and got killed).
   const out = { sale_date: null, sale_location: null, value_sheet_url: null, notice_of_sale_url: null, final_judgment_url: null, unpaid_principal: null, interest_owed: null, docket_url: fjDocUrl || null, failed: false };
-  if (!fjDocUrl) { log(`orange: ${caseNumber} no Final Judgment link on detail page`); out.failed = true; return out; }
+  // 2026-07-28 fix (gate-2 F3): no Final Judgment link on the detail page is a NORMAL, healthy state
+  // for a case that hasn't reached judgment yet — not a site/captcha error. Do NOT set `failed` here,
+  // or a batch of early-stage cases would falsely trip the circuit breaker AND falsely flag the whole
+  // run DEGRADED (the opposite over-correction from the original Bug C). Only an actual thrown error,
+  // an unsolved captcha, or a fetch that never produces a real PDF (below) count as `failed`.
+  if (!fjDocUrl) { log(`orange: ${caseNumber} no Final Judgment link on detail page (not yet at judgment — not a failure)`); return out; }
   try {
     // Up to 2 attempts — the occompt viewer/captcha is occasionally flaky; a retry recovers it.
     for (let attempt = 1; attempt <= 2 && !out.final_judgment_url; attempt++) {
