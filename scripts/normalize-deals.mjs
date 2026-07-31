@@ -30,6 +30,11 @@ await c.query(`CREATE TABLE IF NOT EXISTS deals (
 // NOTE: do NOT overwrite stage/status on conflict — those are driven by the human/agent in the CRM.
 // Stage is only set on first INSERT (derived below); later runs just refresh the underlying data.
 const onconf = `ON CONFLICT (id) DO UPDATE SET flagged=EXCLUDED.flagged,value=EXCLUDED.value,owed=EXCLUDED.owed,spread=EXCLUDED.spread,property_address=EXCLUDED.property_address,updated_at=now()`;
+// Skip-trace results (phones/skiptrace_name) DO refresh on conflict — skiptrace-run.mjs writes the
+// source tables AFTER `deals` rows already exist, so this is the only path that propagates a trace
+// into the CRM spine. (Previously only preforeclosure's `phones` refreshed; skiptrace_name never did,
+// and auction never synced phones/skiptrace_name at all — auction_leads had no such columns.)
+const oncSkip = `${onconf},phones=EXCLUDED.phones,skiptrace_name=EXCLUDED.skiptrace_name`;
 
 const pre = await c.query(`INSERT INTO deals (id,source_type,source_ref,county,property_address,value,owed,spread,stage,status,flagged,phones,skiptrace_name,knock_note,source_url)
 SELECT 'preforeclosure:'||case_number,'preforeclosure',case_number,county,property_address,zillow_value,COALESCE(owed_with_buffer,total_owed),spread,
@@ -39,16 +44,16 @@ SELECT 'preforeclosure:'||case_number,'preforeclosure',case_number,county,proper
       WHEN knock_status='follow_up' THEN 'Follow Up' WHEN knock_status='not_interested' THEN 'Dead'
       WHEN knock_status='deal' THEN 'Under Contract' ELSE 'New' END,
  COALESCE(knock_status,review_status,'new'),flagged,phones,skiptrace_name,knock_note,COALESCE(docket_url,complaint_url)
-FROM foreclosure_leads WHERE property_address IS NOT NULL AND btrim(property_address) <> '' ${onconf},phones=EXCLUDED.phones`);
+FROM foreclosure_leads WHERE property_address IS NOT NULL AND btrim(property_address) <> '' ${oncSkip}`);
 
-const auc = await c.query(`INSERT INTO deals (id,source_type,source_ref,county,property_address,value,owed,spread,stage,status,flagged,auction_date,knock_note,source_url)
+const auc = await c.query(`INSERT INTO deals (id,source_type,source_ref,county,property_address,value,owed,spread,stage,status,flagged,auction_date,phones,skiptrace_name,knock_note,source_url)
 SELECT 'auction:'||case_number,'auction',case_number,county,property_address,COALESCE(value_used,zillow_value),final_judgment,spread,
  CASE WHEN knock_status='interested' THEN 'Interested' WHEN knock_status='talked' THEN 'Talked' WHEN knock_status='deal' THEN 'Under Contract'
       WHEN lower(COALESCE(auction_status,'')) ~ 'cancel|bankruptc' THEN 'Cancelled'
       WHEN lower(COALESCE(auction_status,'')) ~ 'sold' THEN 'Sold'
       WHEN lower(COALESCE(auction_status,'')) ~ 'reschedul' THEN 'Rescheduled' ELSE 'New' END,
- COALESCE(auction_status,'Scheduled'),flagged,COALESCE(sale_date,auction_date),knock_note,COALESCE(final_judgment_url,value_sheet_url,detail_url)
-FROM auction_leads WHERE property_address IS NOT NULL AND btrim(property_address) <> '' ${onconf}`);
+ COALESCE(auction_status,'Scheduled'),flagged,COALESCE(sale_date,auction_date),phones,skiptrace_name,knock_note,COALESCE(final_judgment_url,value_sheet_url,detail_url)
+FROM auction_leads WHERE property_address IS NOT NULL AND btrim(property_address) <> '' ${oncSkip}`);
 
 // No real address = not actionable = not in the CRM. Purge any address-less deals (incl. ones promoted before this rule).
 const purged = await c.query(`DELETE FROM deals WHERE property_address IS NULL OR btrim(property_address) = ''`);
