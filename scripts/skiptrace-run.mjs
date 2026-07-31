@@ -143,7 +143,7 @@ if (!leads.length) { log('no leads need skip-tracing (all remaining already have
 
 log(`skip-tracing ${leads.length} lead(s) across [${keys.join(', ')}]${FLAGGED_ONLY ? ' (flagged-only)' : ''}${COUNTY ? ` in ${COUNTY}` : ''}…`);
 const ctx = await Camoufox({ headless: !HEADED, user_data_dir: join(tmpdir(), `camou-skiprun-${process.pid}`) });
-const p = ctx.pages()[0] || await ctx.newPage();
+let p = ctx.pages()[0] || await ctx.newPage();
 let hit = 0;
 let lowConfHit = 0;
 let blockedCount = 0;
@@ -158,23 +158,29 @@ try {
     const ownerName = cfg.nameCol ? l[cfg.nameCol] : ''; // auction: no name → address-only trace
     const t0 = Date.now();
     let r;
+    // Any exception that escapes traceWithPage (it normally catches its own network/parse errors and
+    // returns {blocked:true} instead of throwing) is treated the SAME as a blocked/failed attempt —
+    // never as a completed "no match". Marking this `blocked:false` here would silently recreate the
+    // exact false-convergence bug this whole fix exists to close.
     try { r = await traceWithPage(p, ownerName, l.property_address); }
-    catch (e) { r = { matched: null, phones: [], blocked: false, lowConfidence: false, lowConfidencePhones: [], lowConfidenceName: null, error: e.message }; log(`  [${l.__source}] ${l.case_number} error:`, String(e.message).slice(0, 50)); }
+    catch (e) { r = { matched: null, phones: [], blocked: true, blockedSources: ['uncaught: ' + String(e.message).slice(0, 80)], lowConfidence: false, lowConfidencePhones: [], lowConfidenceName: null, error: e.message }; }
     const ms = Date.now() - t0;
     timings.push(ms);
 
     if (r.blocked) {
-      // A rate-limited/blocked page is NOT a real attempt — do not stamp skip_traced_at, or this
-      // lead would falsely look "attempted" and get skipped by future runs without --all (the exact
-      // false-convergence bug this fix addresses). Leave the row untouched; back off and retry.
+      // A rate-limited/blocked/errored attempt is NOT a real attempt — do not stamp skip_traced_at,
+      // or this lead would falsely look "attempted" and get skipped by future runs without --all
+      // (the exact false-convergence bug this fix addresses). Leave the row untouched; back off,
+      // recreate the browser page (a page that starts erroring tends to keep erroring), and retry.
       blockedCount++; consecutiveBlocked++;
-      log(`  ${i + 1}/${leads.length} [${l.__source}] ${l.case_number} BLOCKED (${r.blockedSources?.join(',')}) — not marked attempted, will retry on next run`);
+      log(`  ${i + 1}/${leads.length} [${l.__source}] ${l.case_number} BLOCKED/ERROR (${r.blockedSources?.join(',')}) — not marked attempted, will retry on next run`);
       if (consecutiveBlocked >= BLOCK_CIRCUIT_BREAKER) {
-        log(`  ${consecutiveBlocked} consecutive blocks — stopping run early (source site is actively rate-limiting this IP). Re-run later; unattempted leads were left untouched.`);
+        log(`  ${consecutiveBlocked} consecutive blocks — stopping run early (source site is actively rate-limiting this IP, or the browser page stopped responding). Re-run later; unattempted leads were left untouched.`);
         break;
       }
-      log(`  cooling down 60s before continuing…`);
+      log(`  cooling down 60s + recreating browser page before continuing…`);
       await sleep(60000);
+      try { await p.close().catch(() => {}); p = ctx.pages()[0] || await ctx.newPage(); } catch (e2) { /* keep using existing page if recreation fails */ }
       continue;
     }
     consecutiveBlocked = 0;

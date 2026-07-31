@@ -64,7 +64,7 @@ async function tpsDetail(p, href) {
 async function tpsTry(p, url, ln) {
   await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await sleep(4500);
-  const bodyText = await p.evaluate(() => document.body.innerText).catch(() => '');
+  const bodyText = await p.evaluate(() => document.body.innerText);
   if (isBlockedText(bodyText)) throw new RateLimitError('truepeoplesearch blocked/rate-limited');
   const hrefs = await p.evaluate(() => [...new Set([...document.querySelectorAll('a[href*="/find/person/"]')].map(a => a.getAttribute('href')))].slice(0, 4));
   let best = null;
@@ -88,7 +88,14 @@ async function tps(p, street, csz, owner, ln) {
       return r2 || r;
     }
     return r;
-  } catch (e) { if (e instanceof RateLimitError) return { blocked: true, source: e.message }; return null; }
+  } catch (e) {
+    // ANY failure here (rate-limit block, closed page/context, navigation timeout, crashed browser,
+    // etc.) means the search did NOT genuinely complete — never conflate it with a real "no match".
+    // Swallowing this as `return null` was the root cause of the false-convergence bug: a page that
+    // stops responding after the first block silently "succeeds" with 0-3ms empty results for every
+    // remaining lead, and those got stamped skip_traced_at as if they were real completed searches.
+    return { blocked: true, source: `truepeoplesearch error: ${e.message}` };
+  }
 }
 
 // ---- FastPeopleSearch: address search → person detail(s) → phones ----
@@ -98,7 +105,7 @@ async function fps(p, street, csz, ln) {
     const [city, st, zip] = (csz.match(/(.+),?\s*([A-Z]{2})\s*(\d{5})?/) || [, csz, '', '']).slice(1);
     await p.goto(`${FPS}/address/${slug(street)}_${slug(city)}-${(st || '').toLowerCase()}${zip ? '-' + zip : ''}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await sleep(4500);
-    const listText = await p.evaluate(() => document.body.innerText).catch(() => '');
+    const listText = await p.evaluate(() => document.body.innerText);
     if (isBlockedText(listText)) throw new RateLimitError('fastpeoplesearch blocked/rate-limited');
     const hrefs = await p.evaluate(() => [...new Set([...document.querySelectorAll('a[href^="/name/"], a[href*="/person/"]')].map(a => a.getAttribute('href')))].filter(h => /\/name\/|\/person\//.test(h)).slice(0, 4));
     let best = null;
@@ -115,7 +122,10 @@ async function fps(p, street, csz, ln) {
       if (!best && phones.length) best = { name: d.name, phones, exact: false };
     }
     return best;
-  } catch (e) { if (e instanceof RateLimitError) return { blocked: true, source: e.message }; return null; }
+  } catch (e) {
+    // Same rationale as tps() above — any exception means no genuine search happened.
+    return { blocked: true, source: `fastpeoplesearch error: ${e.message}` };
+  }
 }
 
 // Trace using an EXISTING Camoufox page (lets a batch reuse one browser session).
