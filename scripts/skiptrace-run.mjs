@@ -14,6 +14,22 @@
 //                                        name-matched preforeclosure trace. Flag this to a human before
 //                                        pushing auction-sourced phones into an SMS funnel.
 //
+// Data-quality guardrails (added after a run silently wrote wrong-person phones — see git log):
+//   1. not_a_person   — defendants that are banks/LLCs/trusts/"UNKNOWN..." boilerplate (no real
+//                        homeowner name to match against) are flagged and never traced.
+//   2. name-match     — `phones` only ever holds a NAME-MATCHED result (traced person's surname
+//                        agrees with the defendant's). An address-only fallback (no name agreement)
+//                        is written to low_confidence/low_confidence_phones/low_confidence_name
+//                        instead — flagged for human review, never eligible for phones/SMS.
+//   3. blocked !== attempted — TruePeopleSearch/FastPeopleSearch rate-limit by returning a normal
+//                        200 with no results, which used to look identical to a genuine "no match"
+//                        and got stamped skip_traced_at anyway (false convergence: "no leads need
+//                        skip-tracing" while almost nothing had actually been searched). skiptrace.mjs
+//                        now detects the block page text and this script leaves a blocked row
+//                        completely untouched (no skip_traced_at) so it's retried, not skipped, next
+//                        run — plus backs off 60s and stops the run after 3 consecutive blocks rather
+//                        than burning the rest of the batch against a live rate-limit.
+//
 // CLI:
 //   node scripts/skiptrace-run.mjs [--source=preforeclosure|auction|all] [--limit N] [--county Orange]
 //                                   [--flagged-only] [--all] [--headed]
@@ -30,7 +46,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadEnv } from './_env.mjs';
-import { traceWithPage, parseAddress } from './skiptrace.mjs';
+import { traceWithPage, parseAddress, isRealPersonDefendant } from './skiptrace.mjs';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const env = loadEnv(ROOT);
@@ -76,22 +93,37 @@ const SOURCES = {
 // (currently Orange) only capture the street. Filter those out here rather than burn a cycle marking
 // them "traced, no phone" when they were never actually searchable.
 let noAddrSkipped = 0;
+let notPersonSkipped = 0;
 function hasSearchableAddress(addr) {
   const { street, csz } = parseAddress(addr);
   return !!(street && csz);
 }
 
+// `select` above must also carry not_a_person so we don't re-flag/re-query rows every run.
 async function fetchCandidates(key) {
   const cfg = SOURCES[key];
-  let q = sb.from(cfg.table).select(cfg.select).not('property_address', 'is', null);
+  let q = sb.from(cfg.table).select(`${cfg.select},not_a_person`).not('property_address', 'is', null);
   if (FLAGGED_ONLY) q = q.eq('flagged', true);
   if (COUNTY) q = q.ilike('county', COUNTY);
   if (cfg.nameCol) q = q.not(cfg.nameCol, 'is', null);
   q = q.order('spread', { ascending: false, nullsFirst: false }).limit(2000);
   const { data, error } = await q;
   if (error) throw new Error(`${cfg.table} query failed: ${error.message}`);
+
+  // Defendants that are banks/LLCs/trusts/"UNKNOWN..." legal boilerplate have no homeowner name to
+  // match — skip-tracing them just falls back to a stranger at the address. Flag (not_a_person=true)
+  // instead of tracing, and never mark skip_traced_at (no attempt was actually made).
+  const notPerson = cfg.nameCol ? (data || []).filter(r => r[cfg.nameCol] && !isRealPersonDefendant(r[cfg.nameCol]) && !r.not_a_person) : [];
+  for (const r of notPerson) {
+    const { error: flagErr } = await sb.from(cfg.table).update({ not_a_person: true }).eq(cfg.idCol, r[cfg.idCol]);
+    if (flagErr) log(`  [${key}] ${r[cfg.idCol]} not_a_person flag WRITE FAILED:`, flagErr.message);
+  }
+  notPersonSkipped += notPerson.length;
+
   return (data || []).filter(r => {
     if (hasPhone(r.phones)) return false; // hard rule: never re-trace a lead that already has a phone
+    if (r.not_a_person) return false; // just flagged above, or flagged on a prior run
+    if (cfg.nameCol && r[cfg.nameCol] && !isRealPersonDefendant(r[cfg.nameCol])) return false; // just-flagged this pass
     if (!REDO_EMPTY && r.skip_traced_at) return false; // already attempted this run-cycle, came up empty
     if (!hasSearchableAddress(r.property_address)) { noAddrSkipped++; return false; }
     return true;
@@ -106,12 +138,17 @@ for (const k of keys) leads = leads.concat(await fetchCandidates(k));
 if (LIMIT) leads = leads.slice(0, LIMIT);
 
 if (noAddrSkipped) log(`skipped ${noAddrSkipped} lead(s) with no city/state/zip in property_address (not searchable — scraper-level gap, not a trace failure)`);
-if (!leads.length) { log('no leads need skip-tracing (all remaining already have a phone, or none match the filters — use --all to retry empty prior attempts)'); process.exit(0); }
+if (notPersonSkipped) log(`flagged ${notPersonSkipped} lead(s) as not_a_person (bank/LLC/trust/"UNKNOWN..." defendant — no homeowner name to match, not traced)`);
+if (!leads.length) { log('no leads need skip-tracing (all remaining already have a phone, are not_a_person, or none match the filters — use --all to retry empty prior attempts)'); process.exit(0); }
 
 log(`skip-tracing ${leads.length} lead(s) across [${keys.join(', ')}]${FLAGGED_ONLY ? ' (flagged-only)' : ''}${COUNTY ? ` in ${COUNTY}` : ''}…`);
 const ctx = await Camoufox({ headless: !HEADED, user_data_dir: join(tmpdir(), `camou-skiprun-${process.pid}`) });
 const p = ctx.pages()[0] || await ctx.newPage();
 let hit = 0;
+let lowConfHit = 0;
+let blockedCount = 0;
+let consecutiveBlocked = 0;
+const BLOCK_CIRCUIT_BREAKER = 3; // stop the run rather than burn every remaining lead against a live block
 const runStart = Date.now();
 const timings = [];
 try {
@@ -122,19 +159,46 @@ try {
     const t0 = Date.now();
     let r;
     try { r = await traceWithPage(p, ownerName, l.property_address); }
-    catch (e) { r = { matched: null, phones: [] }; log(`  [${l.__source}] ${l.case_number} error:`, String(e.message).slice(0, 50)); }
+    catch (e) { r = { matched: null, phones: [], blocked: false, lowConfidence: false, lowConfidencePhones: [], lowConfidenceName: null, error: e.message }; log(`  [${l.__source}] ${l.case_number} error:`, String(e.message).slice(0, 50)); }
     const ms = Date.now() - t0;
     timings.push(ms);
+
+    if (r.blocked) {
+      // A rate-limited/blocked page is NOT a real attempt — do not stamp skip_traced_at, or this
+      // lead would falsely look "attempted" and get skipped by future runs without --all (the exact
+      // false-convergence bug this fix addresses). Leave the row untouched; back off and retry.
+      blockedCount++; consecutiveBlocked++;
+      log(`  ${i + 1}/${leads.length} [${l.__source}] ${l.case_number} BLOCKED (${r.blockedSources?.join(',')}) — not marked attempted, will retry on next run`);
+      if (consecutiveBlocked >= BLOCK_CIRCUIT_BREAKER) {
+        log(`  ${consecutiveBlocked} consecutive blocks — stopping run early (source site is actively rate-limiting this IP). Re-run later; unattempted leads were left untouched.`);
+        break;
+      }
+      log(`  cooling down 60s before continuing…`);
+      await sleep(60000);
+      continue;
+    }
+    consecutiveBlocked = 0;
+
     const { error: writeErr } = await sb.from(cfg.table).update({
-      phones: r.phones || [], skiptrace_name: r.matched || null, skip_traced_at: new Date().toISOString(),
+      phones: r.phones || [],
+      skiptrace_name: r.matched || null,
+      skip_traced_at: new Date().toISOString(), // only stamped on a genuine, completed (non-blocked) attempt
+      low_confidence: !!r.lowConfidence,
+      low_confidence_phones: r.lowConfidencePhones || [],
+      low_confidence_name: r.lowConfidenceName || null,
     }).eq(cfg.idCol, l[cfg.idCol]);
     if (writeErr) log(`  [${l.__source}] ${l.case_number} WRITE FAILED:`, writeErr.message);
     if (r.phones?.length) hit++;
-    log(`  ${i + 1}/${leads.length} [${l.__source}] ${l.case_number} | ${ownerName || '(no name — address-only)'} → ${r.matched || 'no match'} | ${(r.phones || []).map(x => x.phone).join(', ') || 'no phones'} | ${ms}ms`);
+    if (r.lowConfidence) lowConfHit++;
+    const outcome = r.phones?.length ? (r.phones || []).map(x => x.phone).join(', ')
+      : r.lowConfidence ? `LOW-CONFIDENCE (address-only, name mismatch, discarded): ${(r.lowConfidencePhones || []).join(', ')} for "${r.lowConfidenceName}"`
+      : 'no phones';
+    const partialBlockNote = r.blockedSources?.length ? ` [partial block: ${r.blockedSources.join(',')} unavailable this attempt]` : '';
+    log(`  ${i + 1}/${leads.length} [${l.__source}] ${l.case_number} | ${ownerName || '(no name — address-only)'} → ${r.matched || 'no name-match'} | ${outcome} | ${ms}ms${partialBlockNote}`);
   }
 } finally { await ctx.close().catch(() => {}); }
 
 const totalMs = Date.now() - runStart;
 const avgMs = Math.round(timings.reduce((a, b) => a + b, 0) / (timings.length || 1));
-log(`done — ${hit}/${leads.length} leads got phone numbers | total ${(totalMs / 1000).toFixed(1)}s | avg ${(avgMs / 1000).toFixed(1)}s/lead | no paid API cost (free-site scrape via Camoufox)`);
+log(`done — ${hit}/${leads.length} leads got a NAME-MATCHED phone | ${lowConfHit} address-only low-confidence match(es) discarded/flagged (not written to phones) | ${blockedCount} blocked attempt(s) left untouched for retry | total ${(totalMs / 1000).toFixed(1)}s | avg ${(avgMs / 1000).toFixed(1)}s/lead | no paid API cost (free-site scrape via Camoufox)`);
 process.exit(0);
