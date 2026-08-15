@@ -35,31 +35,68 @@ const sh = (cmd, args, timeout = 120000) => new Promise(r =>
   execFile(cmd, args, { timeout, maxBuffer: 9e7 }, (e, so) => r(e ? '' : String(so || ''))));
 
 // ── text acquisition ───────────────────────────────────────────────────────────
-export async function pdfToText(file, { ocrPages = 3 } = {}) {
+export async function pdfToText(file, { ocrPages = 25 } = {}) {
   let txt = await sh('pdftotext', ['-layout', file, '-']);
   // A real text layer is thousands of characters. Anything under this is a scan.
   if (txt.replace(/\s/g, '').length > 400) return { text: txt, ocr: false };
 
-  const stem = join(tmpdir(), `xl-${process.pid}-${Math.random().toString(36).slice(2, 7)}`);
-  await sh('pdftoppm', ['-r', '200', '-png', '-f', '1', '-l', String(ocrPages), file, stem], 240000);
+  // OCR page-by-page with EARLY EXIT, instead of a flat first-3-pages sweep.
+  // Measured 2026-08-15 on Lake 35-2026-CA-001769-AXXX-01 (43 pages, zero text layer): the
+  // property address is on PAGE 12 — "Property Address: 28013 Poppy Ct, Leesburg, FL 34748".
+  // A 3-page cap could never have found it, which is why that whole class of document came back
+  // empty. Full-document OCR is 82s; stopping at the first usable hit is ~23s.
+  const total = await pageCount(file);
+  const limit = Math.min(total || ocrPages, ocrPages);
   let out = '';
-  for (const f of readdirSync(tmpdir()).filter(n => n.startsWith(stem.split('/').pop())).sort()) {
-    const p = join(tmpdir(), f);
-    out += await sh('tesseract', [p, '-'], 120000) + '\n';
-    try { unlinkSync(p); } catch {}
+  for (let pg = 1; pg <= limit; pg++) {
+    const stem = join(tmpdir(), `xl-${process.pid}-${Math.random().toString(36).slice(2, 7)}`);
+    await sh('pdftoppm', ['-r', '200', '-png', '-f', String(pg), '-l', String(pg), '-singlefile', file, stem], 120000);
+    const png = `${stem}.png`;
+    if (!existsSync(png)) continue;
+    out += await sh('tesseract', [png, '-'], 120000) + '\n';
+    try { unlinkSync(png); } catch {}
+    // Stop as soon as the accumulated text yields a plausible address.
+    if (addressFromText(out).address) break;
   }
   return { text: out, ocr: true };
+}
+
+async function pageCount(file) {
+  const info = await sh('pdfinfo', [file]);
+  const m = info.match(/Pages:\s*(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
 }
 
 // ── the rules ──────────────────────────────────────────────────────────────────
 // Suffix list, trimmed by evidence. RUN / POINT / BEND / COVE / PATH / LOOP / SQUARE were
 // removed: they are ordinary English and surveyor vocabulary, and they were what produced
 // "THENCE RUN S 55°05'58\" W" and prose fragments like "6 was in excess of the just".
-const STREET = String.raw`\d{1,6}[A-Z]?\s+[NSEW]{0,2}\.?\s*[A-Za-z0-9'.\- ]{2,40}?\s*(?:STREET|ST|AVENUE|AVE|DRIVE|DR|ROAD|RD|LANE|LN|COURT|CT|CIRCLE|CIR|BOULEVARD|BLVD|WAY|TERRACE|TER|PLACE|PL|PARKWAY|PKWY|TRAIL|TRL|CROSSING|XING|HIGHWAY|HWY)\b`;
+const HARD_SUFFIX = String.raw`STREET|ST|AVENUE|AVE|DRIVE|DR|ROAD|RD|LANE|LN|COURT|CT|CIRCLE|CIR|BOULEVARD|BLVD|WAY|TERRACE|TER|PLACE|PL|PARKWAY|PKWY|TRAIL|TRL|CROSSING|XING|HIGHWAY|HWY`;
+const STREET = String.raw`\d{1,6}[A-Z]?\s+[NSEW]{0,2}\.?\s*[A-Za-z0-9'.\- ]{2,40}?\s+(?:` + HARD_SUFFIX + String.raw`)\b`;   // \s+ not \s*: see SUTTER/TER bug
+
+// SOFT suffixes — RUN / POINT / BEND / COVE / PATH / LOOP / SQUARE / RIDGE / WALK were removed
+// from the list above because they are ordinary English and surveyor vocabulary, and they
+// produced `THENCE RUN S 55°05'58" W` and prose fragments. But they are also real Florida street
+// types, and dropping them silently cost real deals — measured 2026-08-15 against live documents:
+//   548 RIDGELINE RUN, LONGWOOD, FL 32750      16152 VOLTERRA POINT MONTVERDE, FL 34756
+//   801 SUTTER LOOP, LONGWOOD, FL 32750        1403 Dalkeith Cove, Sanford, FL 32771
+// They are readmitted ONLY when the very next thing is a city + FL + ZIP. Prose never does that,
+// so the disambiguation is the trailing geography rather than the word itself.
+const SOFT_SUFFIX = String.raw`RUN|POINT|PT|BEND|COVE|CV|PATH|LOOP|SQUARE|SQ|RIDGE|WALK|GLEN|CHASE|LANDING|POINTE`;
+// The city usually sits on the NEXT line, so a same-line lookahead can't see it. Instead the
+// soft match is provisional: assemble() only accepts it if the finished address ends in a
+// Florida city + ZIP. Prose ("THENCE RUN S 55°05'58\" W") never gets that far.
+const STREET_SOFT = String.raw`\d{1,6}[A-Z]?\s+[NSEW]{0,2}\.?\s*[A-Za-z0-9'.\- ]{2,40}?\s+(?:` + SOFT_SUFFIX + String.raw`)\b`;
 
 // Addresses that are never the subject property. Learned from real misfires:
 // the plaintiff's HQ, the law firm's service address, out-of-state mailing addresses.
 const NEVER = [
+  // The borrower's MAILING address. Measured on Lake 35-2026-CA-001769-AXXX-01: the property is
+  // "28013 Poppy Ct" (p.12) but p.33 carries "POST OFFICE ADDRESS: 5732 WINDSONG OAK DR" — same
+  // city, same ZIP, in-county, and it passes every other guard. This is the single most dangerous
+  // false positive in these documents because nothing else about it looks wrong.
+  /post\s*office\s*address/i,
+  /mailing\s+address/i,
   /george jenkins/i,           // Polk plaintiff HQ, on every page-1 complaint
   /celebration boulevard/i,     // timeshare resort address shared across defendants
   /corporate\s+(dr|drive|blvd)/i,
@@ -87,7 +124,10 @@ const isPlausible = a =>
 // Pull "<street>, <city>, FL <zip>" out of a block of lines starting at index i.
 function assemble(lines, i, { anchored = false } = {}) {
   const first = (lines[i] || '').trim();
-  const m = first.match(new RegExp(STREET, 'i'));
+  // hard suffix first; then the soft list, which only matches when a city+FL+ZIP follows it
+  let m = first.match(new RegExp(STREET, 'i'));
+  let soft = false;
+  if (!m) { m = first.match(new RegExp(STREET_SOFT, 'i')); soft = !!m; }
   if (!m) return null;
   // Benchmark 2026-07-26 produced "6 was in excess of the just" and "2026 and all subsequent
   // payments have" — the street pattern firing mid-sentence on prose. For an unlabelled guess,
@@ -108,6 +148,8 @@ function assemble(lines, i, { anchored = false } = {}) {
   const tail = [rest, lines[i + 1] || '', lines[i + 2] || ''].join(' ');
   const csz = tail.match(/([A-Za-z .'-]{3,30}),?\s*(?:FL|FLORIDA)[, ]*\s*(\d{5}(?:-\d{4})?)?/i);
   if (csz) addr += `, ${csz[1].trim().replace(/\s{2,}/g, ' ')}, FL${csz[2] ? ' ' + csz[2] : ''}`;
+  // A soft-suffix word is only an address if the geography actually followed it.
+  else if (soft) return null;
   return addr.replace(/\s+,/g, ',').replace(/\s{2,}/g, ' ').trim();
 }
 
@@ -132,6 +174,9 @@ export function addressFromText(text) {
   // Rule 1 — labelled, value 0-6 lines below (THE big one the old parser missed)
   for (let i = 0; i < lines.length; i++) {
     if (!LABEL.test(lines[i])) continue;
+    // ...unless the label line itself marks a mailing/PO address (see NEVER above) — scanning
+    // forward from it walks straight onto the borrower's mail, not the property.
+    if (/post\s*office|mailing/i.test(lines[i])) continue;
     for (let j = 0; j <= 6 && i + j < lines.length; j++) {
       const a = assemble(lines, i + j);
       if (isPlausible(a)) return { address: a, how: `label+${j}` };

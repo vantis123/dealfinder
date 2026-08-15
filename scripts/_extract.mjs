@@ -1,39 +1,31 @@
-// Shared document-extraction ladder for every county scraper.
+// LADDER — decides HOW HARD to try, not HOW to read. The reading itself is delegated to
+// scripts/extract-local.mjs, which is the measurable on-box extractor (bench-extract.mjs scores it
+// against data/extraction-corpus.jsonl — never assume, measure).
 //
-// WHY THIS EXISTS (2026-08-11): each county script had its own private addr()/owed(), and the
-// address path only ever called `pdftotext`. The original design note (run-month.mjs:4, initial
-// commit) was "Address via pdftotext, owed via FREE OCR (no AI)" — true for Orange, the first
-// county built, whose complaints are e-filed with a text layer. It silently became false as Polk /
-// Lake / Volusia were added: their documents are SCANNED IMAGES with no text layer, so pdftotext
-// returns nothing and the address was lost. `USE_AI=0` (2026-07-14) then removed the Claude
-// fallback that had been masking it, and non-Orange address loss went 56% -> 96%.
+// 2026-08-15: this file used to contain a SECOND, parallel address parser. That was the mistake —
+// extract-local.mjs already existed on the VPS, built to the standing instruction that the AI is
+// the teacher and the local code is the product, and it carried evidence this one lacked (the
+// address sits 0-6 lines BELOW its label; units like "Unit 21" must be kept; a NEVER list learned
+// from real misfires). Its rules won; the useful parts of this file were ported INTO it:
+//   · POST OFFICE ADDRESS / mailing-address rejection (the borrower's mail, same city + ZIP)
+//   · soft street suffixes (RUN/LOOP/COVE/POINT) readmitted when a FL city+ZIP follows
+//   · the SUTTER/TER bug — an abbreviation matching INSIDE a word
+//   · page-by-page OCR with early exit (was a flat 3-page cap; Lake's address is on page 12)
+// What remains here is only what a ladder does: escalate, guard the region, and gate confidence.
 //
-// The fix is the ladder below. OCR is FREE, runs on-box in ~1-2s/page, and the muscle
-// (pdftoppm + tesseract) was ALREADY installed and already used for the Value form — it was just
-// never pointed at the address document.
+//   tier 1-3  extract-local.mjs  free, on-box (pdftotext -layout / tesseract / learned rules)
+//   tier 4    LLM pick on TEXT   Claude subscription first, metered key as a rare fallback
+//   tier 5    vision on the PDF  last resort
 //
-//   tier 1  pdftotext                      free, instant   — documents with a real text layer
-//   tier 2  pdftoppm + tesseract (OCR)     free, on-box    — scanned images / no text layer
-//   tier 3  label-aware deterministic pick free            — property addr vs mailing/law-firm addr
-//   tier 4  LLM pick on TEXT: local Ollama -> Claude subscription -> metered key (last)
-//   tier 5  Claude vision on the PDF (subscription first) — only when 1-4 all fail
-//
-// Tiers 1-3 are 100% on-box and free and carry ~64% of all results (measured 2026-08-12: 112 of 174).
-// Tiers 4-5 leave the box but run on the FLAT subscription, not metered tokens.
-//
-// Tier 3 is not optional. A 43-page complaint contains the law firm's address, the servicer's
-// address AND the borrower's mailing address. Measured on Lake 35-2026-CA-001769-AXXX-01:
-//   p.12  "Property Address: 28013 Poppy Ct, Leesburg, FL 34748"      <- correct
-//   p.33  "POST OFFICE ADDRESS: 5732 WINDSONG OAK DR, LEESBURG, FL 34748"  <- borrower's MAIL
-// Same city, same ZIP, in-county. A first-match regex takes the wrong one and you knock the wrong
-// door. Only reading the LABEL disambiguates. This is the same class of bug as 2026-07-02, when an
-// Orange case picked up a West Palm Beach law firm and showed a $27M commercial building on Zillow.
+// `accepted` vs `address`: only high/medium confidence becomes a door-knock target. A guess is
+// still returned for the review queue, but it is never written to property_address.
 
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { addressFromPdf } from './extract-local.mjs';
 
 const execFileP = promisify(execFile);
 const rnd = () => Math.random().toString(36).slice(2, 9);
@@ -396,23 +388,22 @@ export async function extractAddress(file, { county, useAI = true, anthropic = n
   };
   if (!file || !existsSync(file)) return finish(result);
 
-  // tier 1 — text layer
-  let text = pdfText(file);
-  let usedOcr = false;
-  if (!looksLikeRealText(text)) {
-    // tier 2 — OCR (this is the step that was missing entirely)
-    text = await ocrUntilAnchor(file, { maxPages: maxOcrPages });
-    usedOcr = true;
+  // tiers 1-3 — the measurable on-box extractor (text layer, OCR, learned rules)
+  const local = await addressFromPdf(file);
+  result.text = '';
+  if (local.address) {
+    result.address = local.address;
+    result.tier = local.ocr ? `ocr:${local.how}` : `text:${local.how}`;
+    result.confidence = 'high';
+    return finish(result);
   }
-  result.text = text;
 
-  let cands = addressCandidates(text);
-  // If OCR early-exited without a hit, or the text layer had nothing, sweep more pages.
-  if (!cands.length && !usedOcr) {
-    text = await ocrUntilAnchor(file, { maxPages: maxOcrPages });
-    result.text = text; usedOcr = true;
-    cands = addressCandidates(text);
-  }
+  // Only if the free extractor found nothing do we spend anything. Re-read the text once so the
+  // AI tiers have something to work with.
+  let text = pdfText(file);
+  if (!looksLikeRealText(text)) text = await ocrUntilAnchor(file, { maxPages: maxOcrPages });
+  result.text = text;
+  const cands = addressCandidates(text);
   result.candidates = cands.map(c => c.address);
 
   if (cands.length) {
