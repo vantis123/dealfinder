@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { loadEnv } from './_env.mjs';
 import { saveDocToStorage } from './_storage.mjs';
 import { COUNTIES } from './counties.mjs';
+import { extractAddress, extractOwed } from './_extract.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -89,11 +90,14 @@ async function addrAI(raw) {
     return j.address && /\d/.test(j.address) ? String(j.address).replace(/\s{2,}/g, ' ').trim() : null;
   } catch (e) { return null; }
 }
+// Address now comes from the SHARED ladder in _extract.mjs:
+//   pdftotext -> free on-box OCR (tesseract) -> label-aware pick -> LLM pick -> vision.
+// The old body was pdftotext + a "[Property Address]" anchor, then Claude. It had NO OCR, so a
+// scanned Seminole filing returned nothing the moment USE_AI was 0 (2026-07-14 -> 2026-08-11).
 async function addr(file) {
-  const raw = pdftext(file);
-  const quick = addrAnchor(raw);
-  if (quick) return quick;                 // clean anchor hit → trust it (cheap)
-  return USE_AI ? await addrAI(raw) : null; // garbled/servicer/missing → Claude reads it
+  const r = await extractAddress(file, { county: 'Seminole', useAI: USE_AI, anthropic });
+  // `accepted` only — a low-confidence guess stays out of property_address (never a wrong door).
+  return r.accepted;
 }
 async function owedOCR(file) {
   const tmp = join(tmpdir(), `sem-ocr-${process.pid}-${Math.random().toString(36).slice(2)}`);
@@ -105,7 +109,7 @@ async function owedOCR(file) {
   } catch (e) { return {}; } finally { try { unlinkSync(`${tmp}.png`); } catch (e) {} }
 }
 async function owedAI(file) { try { const b64 = readFileSync(file).toString('base64'); const msg = await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 300, messages: [{ role: 'user', content: [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }, { type: 'text', text: 'Florida "Value of Real Property or Mortgage Foreclosure Claim" form. Reply ONLY JSON {"principalDue":number,"interestOwed":number}. Numbers only.' }] }] }); const j = JSON.parse(msg.content[0].text.match(/\{[\s\S]*\}/)[0]); return { principalDue: money(j.principalDue), interestOwed: money(j.interestOwed) }; } catch (e) { return {}; } }
-async function owed(file) { const r = await owedOCR(file); if (r.principalDue != null || r.interestOwed != null) return r; return USE_AI ? owedAI(file) : r; }
+async function owed(file) { return extractOwed(file, { useAI: USE_AI, anthropic }); }
 
 // Pull a docket PDF exactly how the viewer's JS does it.
 async function fetchDoc(p, href) {

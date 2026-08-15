@@ -71,3 +71,20 @@ export async function ensureBucket(sb) {
     return { ok: true };
   } catch (e) { return { ok: false, msg: String(e.message) }; }
 }
+
+// ── added 2026-08-15 (Mac branch) ───────────────────────────────────────────────────────────────
+// Stored URLs carry a 30-day signature, so every document silently 400s 30 days after it is saved.
+// Measured: 57 dead links while ZERO files were missing from the bucket. A link that expires on a
+// schedule is a slow-motion outage that looks exactly like a missing file.
+// Anything READING a stored doc should mint a fresh URL rather than trust the one in the DB.
+export function docPath(caseNumber, kind) {
+  return `${String(caseNumber).replace(/[^A-Za-z0-9._-]/g, '_')}/${kind}.pdf`;
+}
+export async function freshSignedUrl(sb, caseNumber, kind, ttlSeconds = SIGNED_URL_TTL_SECONDS) {
+  if (!sb) return null;
+  try {
+    const { data, error } = await sb.storage.from(BUCKET).createSignedUrl(docPath(caseNumber, kind), ttlSeconds);
+    if (error) return null;
+    return data?.signedUrl || null;
+  } catch (e) { return null; }
+}

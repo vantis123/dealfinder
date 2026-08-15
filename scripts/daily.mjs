@@ -75,7 +75,7 @@ try {
         // USE_AI=0 (Phillip 2026-07-14): OCR/regex-only everywhere, like Orange — the non-Orange county
         // scripts default Claude vision ON, which was the biggest controllable API line ($5-15/mo).
         // Scanned-image PDFs land in manual_review instead. Set USE_AI=1 in .env to re-enable.
-        env: { ...process.env, COUNTY: county, DATE_FROM, DATE_TO, NOTIFY_ON_SCAN: '0', USE_AI: env.USE_AI || '0' },
+        env: { ...process.env, COUNTY: county, DATE_FROM, DATE_TO, NOTIFY_ON_SCAN: '0', USE_AI: env.USE_AI || '1' },
       });
     } catch (e) {
       log(`scan FAILED for ${county}:`, e.code === 'ETIMEDOUT' ? `TIMED OUT after ${env.CLERK_TIMEOUT_MIN || 150} min (killed)` : String(e.message).slice(0, 100));
@@ -108,15 +108,12 @@ try {
     }
   }
 
-  // Appraiser fallback — fills in anything Zillow couldn't value. Free, no cap, no bot wall,
-  // so it runs every day regardless of Apify state. It only touches leads with zillow_value
-  // IS NULL and writes value_source='ocpa', so a real Zillow comp is never overwritten.
-  // The number it produces is a FLOOR (~15% under Zillow, measured) — good enough to CONFIRM
-  // a door-knock, never used to reject one. See scripts/value-ocpa.mjs for the full rationale.
-  try {
-    log('=== appraiser valuation fallback (free) ===');
-    execFileSync(process.execPath, [join(__dirname, 'value-ocpa.mjs')], { stdio: 'inherit', timeout: 20 * 60_000, killSignal: 'SIGKILL', env: process.env });
-  } catch (e) { log('ocpa valuation failed:', String(e.message).slice(0, 100)); recordError('ocpa-valuation', null, e); }
+  // NO appraiser valuation — ZILLOW ONLY (Phillip, 2026-08-12).
+  // County assessed values run ~15% under market (median OCPA/Zillow 0.854, measured on 11 of
+  // our own Orange leads) and the SPREAD IS THE PRODUCT — a number that is quietly 15% light
+  // means skipping deals we should be taking, and we never see the ones we didn't knock.
+  // scripts/value-ocpa.mjs stays in-repo as a LOCATOR (parcel / owner / homestead /
+  // address-from-legal-description) but must NEVER supply a value.
 
   // Combined daily summary across all counties → scan-status.json (drives the dashboard "daily update" popup).
   // F1 fix (2026-07-27, gate-2): counts default to null/0 and the Supabase query has its OWN try —
