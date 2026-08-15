@@ -9,7 +9,9 @@ import { loadEnv } from './_env.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const env = loadEnv(ROOT);
-const SITE = env.DEAL_FINDER_URL || 'https://web-production-a8fce.up.railway.app';
+// Canonical VPS URL (2026-08-05). The old Railway default was DEAD (404) and DEAL_FINDER_URL was
+// unset, so this CTA was emailing customers a broken link. VPS-only per the hosting decision.
+const SITE = env.DEAL_FINDER_URL || 'https://dealfinder.srv1856446.hstgr.cloud';
 const BRAND = '#0ea5e9';      // primary — hsl(199 89% 48%)
 const INK = '#0b1220';        // near-black brand ink
 

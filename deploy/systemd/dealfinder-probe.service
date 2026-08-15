@@ -1,0 +1,25 @@
+[Unit]
+Description=DealFinder uptime probe — fast local check, pages Telegram after 3 consecutive failures
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vantis
+Group=vantis
+WorkingDirectory=/srv/vantis-hq/2-dealfinder/dealfinder-standalone
+Environment=HOME=/home/vantis
+Environment=PATH=/home/vantis/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/srv/vantis-hq/2-dealfinder/dealfinder-standalone/.env
+# Same guard as dealfinder-health.service: .env carries ANTHROPIC_API_KEY for the legacy
+# metered enrich path, and the `claude` CLI prefers it over the Max subscription login.
+# The probe never calls claude, but keep the pattern so a future check added here is safe.
+UnsetEnvironment=ANTHROPIC_API_KEY
+# Debounce state lives in /var/lib/dealfinder (probe runs are oneshot processes) —
+# StateDirectory creates it owned by the vantis user this unit runs as.
+StateDirectory=dealfinder
+ExecStart=/usr/bin/node scripts/healthcheck.mjs --probe
+# Exit 1 means "probe ran but could not persist state" — surface that as a unit failure.
+TimeoutStartSec=2m
+StandardOutput=append:/var/log/dealfinder/probe.log
+StandardError=append:/var/log/dealfinder/probe.log

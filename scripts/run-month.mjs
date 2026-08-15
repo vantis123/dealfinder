@@ -1,7 +1,12 @@
 // Foreclosure door-knock pipeline — PARALLEL LOCAL workers (target: full month in <10 min).
 // N local headless Chromium browsers run at once (no Browserless concurrency cap, no 60s session limit).
 // Each worker: solve its own CapSolver token -> search once -> sweep its slice of CA cases
-// (click docket -> download Complaint+Value -> enrich). Address via pdftotext, owed via FREE OCR (no AI).
+// (click docket -> download Complaint+Value -> enrich).
+// Address + owed both go through the SHARED ladder in _extract.mjs (pdftotext -> free on-box OCR ->
+// label-aware pick -> LLM -> vision). The old note here read "Address via pdftotext, owed via FREE
+// OCR (no AI)" — that split was written for Orange (text-layer complaints) and quietly became wrong
+// as scanned-document counties were added; it is what cost ~70% of pre-foreclosure leads. See
+// arvantis-brain/products/deal-finder/address-extraction-local-first-ladder.md
 // Live findings + progress written to scan-status.json. Run: node run-month.mjs   (env: CONCURRENCY, USE_AI)
 import { chromium } from 'playwright';
 import { Camoufox } from 'camoufox-js';
@@ -15,6 +20,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadEnv } from './_env.mjs';
 import { saveDocToStorage } from './_storage.mjs';
+import { extractAddress, extractOwed } from './_extract.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -67,18 +73,18 @@ async function getToken(maxWaitMs=600000){ const t0=Date.now(); for(;;){ while(t
 // Bug found 2026-07-02 (Orange case showed a $27M West Palm commercial building on Zillow).
 const COUNTY_ZIPS={ orange:['327','328','347'], seminole:['327'], volusia:['321','327','341'], brevard:['329','327','328'] };
 const PROP_ANCHOR=/(located at|commonly known as|property address|a\/k\/a|also known as|more particularly|real property|mortgaged (prem|property)|subject property)/i;
-function addr(file, county){
-  try{
-    const t=execFileSync('pdftotext',[file,'-'],{maxBuffer:2e8}).toString().replace(/\s+/g,' ');
-    const zips=COUNTY_ZIPS[(county||'').toLowerCase()]||['32','34']; // default: Central FL
-    const re=/(\d{2,6}\s+[A-Za-z0-9 .#-]+?,\s*[A-Za-z .]+?,\s*FL\s*(\d{5}))/gi;
-    const cands=[]; let m;
-    while((m=re.exec(t))) cands.push({addr:m[1].trim().replace(/\s{2,}/g,' '), zip:m[2], idx:m.index});
-    const inC=cands.filter(c=>zips.some(p=>c.zip.startsWith(p))); // drop out-of-county (the attorney address)
-    if(!inC.length) return null; // nothing in-county -> flagged manual_review, never a wrong address
-    for(const c of inC){ if(PROP_ANCHOR.test(t.slice(Math.max(0,c.idx-70),c.idx))) return c.addr; }
-    return inC[0].addr;
-  }catch(e){ return null; }
+// Address now comes from the SHARED ladder in _extract.mjs:
+//   pdftotext -> free on-box OCR (tesseract) -> label-aware pick -> LLM pick -> vision.
+// The old body (kept in run-month.mjs.bak-2026-08-11) was pdftotext + a regex that demanded a
+// strict two-comma `street, city, FL zip`. Real filings write "6972 Lake Gloria Blvd, Orlando FL
+// 32809" / "301 Illinois Ave Apopka FL 32703" / "548 RIDGELINE RUN , LONGWOOD , FL 32750", none of
+// which matched — so 58% of ORANGE cases lost their address even with a clean text layer. Orange
+// also never had ANY fallback: no OCR, no AI. It does now.
+// NOTE: this is now async — the call site must await it.
+async function addr(file, county){
+  const r = await extractAddress(file, { county, useAI: USE_AI, anthropic });
+  // `accepted` only — a low-confidence guess stays out of property_address (never a wrong door).
+  return r.accepted;
 }
 // Court filing date from the complaint's "E-Filed MM/DD/YYYY" stamp (first page) → ISO YYYY-MM-DD.
 function filingDate(file){try{const t=execFileSync('pdftotext',['-l','1',file,'-'],{maxBuffer:5e7}).toString();const m=t.match(/E-?Filed:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i)||t.match(/\bFiled:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);return m?`${m[3]}-${String(+m[1]).padStart(2,'0')}-${String(+m[2]).padStart(2,'0')}`:null;}catch(e){return null;}}
@@ -93,12 +99,12 @@ async function owedOCR(file){
 }
 async function owedAI(file){try{const b64=readFileSync(file).toString('base64');const msg=await anthropic.messages.create({model:'claude-sonnet-4-6',max_tokens:300,messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:'Florida "Value of Real Property or Mortgage Foreclosure Claim" form. Reply ONLY JSON {"principalDue":number,"interestOwed":number}. Numbers only.'}]}]});tokIn+=msg.usage?.input_tokens||0;tokOut+=msg.usage?.output_tokens||0;const j=JSON.parse(msg.content[0].text.match(/\{[\s\S]*\}/)[0]);return{principalDue:money(j.principalDue),interestOwed:money(j.interestOwed)};}catch(e){return{};}}
 // Free OCR first; fall back to Claude vision only when OCR fails (scrambled-font value forms).
-async function owed(file){
-  if(USE_AI) return owedAI(file);
-  const r=await owedOCR(file);
-  if(r.principalDue!=null||r.interestOwed!=null) return r;
-  return owedAI(file); // OCR got nothing (encoded PDF) → accurate vision fallback
-}
+// Owed now uses the shared ladder: text -> OCR of EVERY page of the form -> vision.
+// The old owedOCR() rendered page 1 only (`-singlefile`, no page range), so a two-page Value form
+// silently returned nothing; and USE_AI=1 skipped the free OCR entirely and went straight to the
+// paid vision call. Among leads that DID have an address, missing `owed` went 16% -> 43% after
+// 2026-07-14. No owed = no spread = the lead can never flag.
+async function owed(file){ return extractOwed(file, { useAI: USE_AI, anthropic }); }
 // Zillow via local Camoufox (home residential IP + stealth) — no Browserless, no proxy needed.
 let zN=0;
 async function zillow(a){
@@ -120,7 +126,7 @@ async function zillow(a){
 async function enrich(rec){
   const dir=`${OUT}/${rec.caseNumber}`,cF=`${dir}/Complaint.pdf`,vF=`${dir}/Value-of-Real-Property.pdf`;
   rec.complaintX=!existsSync(cF); rec.valueX=!existsSync(vF);
-  if(existsSync(cF)) rec.propertyAddress=addr(cF, env.COUNTY);
+  if(existsSync(cF)) rec.propertyAddress=await addr(cF, env.COUNTY);
   if(existsSync(vF)){ const v=await owed(vF); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; }
   const o=(rec.principalDue||0)+(rec.interestOwed||0); rec.totalOwed=o||null; rec.owedWithBuffer=o?o+10000:null;
   // research each case fully, one by one: value + spread + verdict inline
@@ -265,7 +271,10 @@ async function worker(slot){
         // the permanent URL. Fall back to the (expiring) county link only if the upload fails.
         const srcComplaint=info.complaint||null, srcValue=info.value||null;
         rec.complaintUrl=null; rec.valueUrl=null;
-        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=addr(tmp, env.COUNTY); rec.filingDate=filingDate(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
+        // NOTE: addr() is async now (shared ladder incl. OCR) — it MUST be awaited.
+        // The catch below used to be empty: a failed download, a corrupt PDF and a genuinely
+        // unparseable address all vanished into the same silent `no_address`. Record the reason.
+        if(srcComplaint){ const tmp=`/tmp/df-cmp-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcComplaint); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); rec.propertyAddress=await addr(tmp, env.COUNTY); rec.filingDate=filingDate(tmp); rec.complaintUrl=await saveDocToStorage(sb,rec.caseNumber,'complaint',buf)||srcComplaint;}catch(e){ rec.reviewReason='cmp_err:'+String(e.message).slice(0,20); } finally{ try{unlinkSync(tmp);}catch(e){} } }
         if(srcValue){ const tmp=`/tmp/df-val-${slot}-${done}.pdf`; try{const r=await sess.p.request.get(srcValue); const buf=Buffer.from(await r.body()); writeFileSync(tmp,buf); const v=await owed(tmp); rec.principalDue=v.principalDue; rec.interestOwed=v.interestOwed; rec.valueUrl=await saveDocToStorage(sb,rec.caseNumber,'value',buf)||srcValue;}catch(e){} finally{ try{unlinkSync(tmp);}catch(e){} } }
       }catch(e){ rec.reviewReason='err:'+String(e.message).slice(0,24); }
       rec.complaintX=!rec.complaintUrl; rec.valueX=!rec.valueUrl;

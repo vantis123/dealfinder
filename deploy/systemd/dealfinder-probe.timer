@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the DealFinder uptime probe every 2 minutes
+
+[Timer]
+# 2-minute cadence + the probe's 3-consecutive-failure debounce = a page ~4-6 min after a real
+# outage starts, while the ~6s Restart=always respawn blip can never trip more than one probe.
+OnCalendar=*-*-* *:00/2:00
+# A missed probe is not worth catching up — the next one is at most 2 minutes away.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

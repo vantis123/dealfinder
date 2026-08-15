@@ -30,6 +30,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadEnv } from './_env.mjs';
 import { saveDocToStorage } from './_storage.mjs';
+import { extractAddress, extractOwed } from './_extract.mjs';
 
 const execFileP = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,16 +103,18 @@ async function addrVision(file) {
     return j.address && /\d/.test(j.address) ? String(j.address).replace(/\s{2,}/g, ' ').trim() : null;
   } catch (e) { return null; }
 }
+// Address now comes from the SHARED ladder in _extract.mjs:
+//   pdftotext -> free on-box OCR (tesseract) -> label-aware pick -> LLM pick -> vision.
+// The old body was pdftotext + a "[Property Address]" anchor, then Claude. It had NO OCR, so a
+// scanned Polk filing returned nothing the moment USE_AI was 0 (2026-07-14 -> 2026-08-11).
 async function addr(file) {
-  const raw = pdftext(file);
-  const quick = addrAnchor(raw);
-  if (quick) return quick;
-  if (USE_AI && raw.replace(/\s/g, '').length > 300) { const a = await addrAI(raw); if (a) return a; } // has a text layer
-  return USE_AI ? await addrVision(file) : null;                                                        // scanned image → read the PDF
+  const r = await extractAddress(file, { county: 'Polk', useAI: USE_AI, anthropic });
+  // `accepted` only — a low-confidence guess stays out of property_address (never a wrong door).
+  return r.accepted;
 }
 async function owedOCR(file) { const tmp = join(tmpdir(), `polk-ocr-${process.pid}-${Math.random().toString(36).slice(2)}`); try { await execFileP('pdftoppm', ['-r', '200', '-png', '-singlefile', file, tmp]); const { stdout } = await execFileP('tesseract', [`${tmp}.png`, '-'], { maxBuffer: 5e7 }); const p = stdout.match(/([\d][\d,]*\.\d{2})[^\n]{0,18}Principal due/i), i = stdout.match(/([\d][\d,]*\.\d{2})[^\n]{0,18}Interest owed/i); return { principalDue: p ? money(p[1]) : null, interestOwed: i ? money(i[1]) : null }; } catch (e) { return {}; } finally { try { unlinkSync(`${tmp}.png`); } catch (e) {} } }
 async function owedAI(file) { try { const b64 = readFileSync(file).toString('base64'); const msg = await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 300, messages: [{ role: 'user', content: [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }, { type: 'text', text: 'Florida "Value of Real Property or Mortgage Foreclosure Claim" form. Reply ONLY JSON {"principalDue":number,"interestOwed":number}. Numbers only.' }] }] }); const j = JSON.parse(msg.content[0].text.match(/\{[\s\S]*\}/)[0]); return { principalDue: money(j.principalDue), interestOwed: money(j.interestOwed) }; } catch (e) { return {}; } }
-async function owed(file) { const r = await owedOCR(file); if (r.principalDue != null || r.interestOwed != null) return r; return USE_AI ? owedAI(file) : r; }
+async function owed(file) { return extractOwed(file, { useAI: USE_AI, anthropic }); }
 
 async function upsertLead(rec) {
   try {
@@ -121,6 +124,7 @@ async function upsertLead(rec) {
       total_owed: rec.totalOwed ?? null, owed_with_buffer: rec.owedWithBuffer ?? null,
       review_status: rec.reviewStatus || null, review_reason: rec.reviewReason || null,
       complaint_url: rec.complaintUrl || null, value_url: rec.valueUrl || null, docket_url: rec.docketUrl || null,
+      lis_pendens_url: rec.lisPendensUrl || null,   // Polk's real address source — kept so it can be re-read
       filing_date: rec.filingDate || null, scan_month: MONTH, scan_year: YEAR, updated_at: new Date().toISOString(),
     }, { onConflict: 'case_number' });
   } catch (e) { log('upsert err', String(e.message).slice(0, 50)); }
@@ -251,9 +255,20 @@ try {
         }
         // ADDRESS: Lis Pendens is 1 page, always public, and (by FL law) carries the legal description +
         // "Also known as: <street address>" — the reliable, cheap address source. Fall back to the complaint.
+        // The Lis Pendens is Polk's ACTUAL address source (the complaint is public page-1 only, per
+        // the note above). It used to be downloaded, read, then DELETED — so when Polk sat at 98%
+        // no-address there was nothing left to diagnose against: 0 of 25 stored Polk documents could
+        // even be tested, because the one doc that carries the address was never kept.
+        // Now saved to storage like the others → Polk becomes verifiable AND backfillable offline.
         if (lis) {
           const buf = await downloadDoc(p, lis.token, lis.seq);
-          if (buf) { const f = join(tmpdir(), `polk-l-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); rec.propertyAddress = await addr(f); try { unlinkSync(f); } catch (e) {} }
+          if (buf) {
+            const f = join(tmpdir(), `polk-l-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`);
+            writeFileSync(f, buf);
+            rec.propertyAddress = await addr(f);
+            rec.lisPendensUrl = await saveDocToStorage(sb, rec.caseNumber, 'lispendens', buf) || null;
+            try { unlinkSync(f); } catch (e) {}
+          }
         }
         if (!rec.propertyAddress && cmpFile) rec.propertyAddress = await addr(cmpFile);
         if (cmpFile) { try { unlinkSync(cmpFile); } catch (e) {} }

@@ -48,10 +48,14 @@ for (const county of ready) {
     execFileSync(process.execPath, [join(__dirname, SCRIPTS[county] || 'run-month.mjs')], {
       stdio: 'inherit',
       timeout: parseInt(env.CLERK_TIMEOUT_MIN || '150', 10) * 60_000, killSignal: 'SIGKILL',
-      // USE_AI=0 (Phillip 2026-07-14): OCR/regex-only everywhere, like Orange — the non-Orange county
-      // scripts default Claude vision ON, which was the biggest controllable API line ($5-15/mo).
-      // Scanned-image PDFs land in manual_review instead. Set USE_AI=1 in .env to re-enable.
-      env: { ...process.env, COUNTY: county, DATE_FROM, DATE_TO, NOTIFY_ON_SCAN: '0', USE_AI: env.USE_AI || '0' },
+      // USE_AI default was '0' from 2026-07-14 to 2026-08-11 (a $5-15/mo cost cut). It removed the
+      // Claude tiers from addr()/owed(), and because the address path had NO OCR at all, scanned
+      // complaints lost their only reader: non-Orange address loss went 56% -> 96% and ~70% of
+      // pre-foreclosure leads were dropped before reaching the CRM for four weeks.
+      // Restored to '1' 2026-08-11. The AI tiers are now a LAST resort, not the primary path —
+      // scripts/_extract.mjs does pdftotext -> free on-box OCR -> deterministic label-aware pick
+      // first, so this flag should rarely cost anything. Set USE_AI=0 in .env to force free-only.
+      env: { ...process.env, COUNTY: county, DATE_FROM, DATE_TO, NOTIFY_ON_SCAN: '0', USE_AI: env.USE_AI || '1' },
     });
   } catch (e) {
     log(`scan FAILED for ${county}:`, e.code === 'ETIMEDOUT' ? `TIMED OUT after ${env.CLERK_TIMEOUT_MIN || 150} min (killed)` : String(e.message).slice(0, 100));
@@ -94,6 +98,22 @@ try {
   log(`combined daily summary: ${knock} knock · ${review} review · ${notWorth} not-worth · $${Math.round(pipeline)} pipeline`);
 } catch (e) { log('combined summary failed:', String(e.message).slice(0, 80)); }
 
+// ── NO COUNTY-APPRAISER VALUATION. ZILLOW ONLY. ────────────────────────────────────────────────
+// Phillip, 2026-08-12: "we dont want to use the county apprasial records those numbers are much
+// less than market value thats why we need to rely on zillow only."
+//
+// `scripts/value-ocpa.mjs` was briefly wired in here earlier today and has been REMOVED. The script
+// is kept in the repo (it is a working, documented appraiser client and useful for parcel/ownership
+// lookups) but it must NOT write values into the valuation path. Measured bias: median
+// OCPA/Zillow 0.854, range 0.52-1.00 — an assessed value is not a resale comp, and a spread built
+// on one understates the deal.
+//
+// CONSEQUENCE, stated plainly so it is not a surprise: Zillow-only makes **Apify a single point of
+// failure** for every valuation. It has capped twice (2026-07-14 and 2026-07-26), and each time the
+// pipeline produced leads with no value, therefore no spread, therefore zero flagged door-knocks.
+// Keeping the Apify account funded IS the valuation strategy now.
+// See arvantis-brain/products/deal-finder/valuation-zillow-only.md
+//
 // Auto-populate the CRM — refresh the unified `deals` spine (what the CRM reads) from both source tables.
 // (Phillip chose auto-flow: finds go all the way into the pipeline. Set AUTO_PROMOTE_CRM=0 to disable.)
 if (env.AUTO_PROMOTE_CRM !== '0') {

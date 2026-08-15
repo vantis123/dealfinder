@@ -14,7 +14,7 @@ import { loadEnv } from './_env.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const env = loadEnv(ROOT);
 
-const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+export const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const fmtK = n => {
   const v = Number(n);
   if (!v) return '?';
@@ -73,7 +73,7 @@ function buildReport(leads, when) {
 
 // Build the receiver list: the primary TELEGRAM_BOT_TOKEN/CHAT_ID + any extras in TELEGRAM_RECEIVERS
 // (JSON array of {token, chat, label}). Each gets the full daily report. Deduped by token+chat.
-function buildReceivers(token, chat) {
+export function buildReceivers(token, chat) {
   const list = [];
   if (token && chat) list.push({ token, chat, label: 'primary' });
   try {
@@ -116,14 +116,17 @@ async function usageWarnings() {
   return warn;
 }
 
-async function send(token, chat, text) {
+// THE Telegram sender — exported so other seats (healthcheck.mjs --probe) reuse it instead of
+// growing a second Telegram client. Returns the full Bot API response ({ok, result:{message_id}})
+// so callers can log delivery proof; check `.ok`, not truthiness.
+export async function send(token, chat, text) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true }),
   }).then(r => r.json()).catch(e => ({ ok: false, description: String(e) }));
   if (!res.ok) console.log('  telegram send error:', res.description || res);
-  return res.ok;
+  return res;
 }
 
 // Split into <4096-char Telegram messages on lead boundaries.
@@ -182,8 +185,20 @@ export async function notifyTelegram({ token, chat, county, preview = false, mar
     let msg = `✅ <b>DealFinder</b> ran ${niceDate(when)} — no new doors worth knocking today.`;
     if (warnings.length) msg += '\n\n' + warnings.join('\n');
     if (preview) { console.log('\n----- PREVIEW (quiet day) -----\n' + toPlain(msg) + '\n'); return { preview: true, leads: 0, warnings: warnings.length }; }
-    if (heartbeat) for (const r of receivers) await send(r.token, r.chat, msg);
-    return { sent: 0, warnings: warnings.length };
+    // Capture per-receiver delivery, exactly like the busy-day path below. Previously this
+    // discarded send()'s result and returned a bare {sent:0} — and `sent` counts LEADS, not
+    // messages — so a heartbeat that delivered fine and one that failed for EVERY receiver
+    // logged the identical line `telegram: {"sent":0,"warnings":1}`. During the July bot
+    // outage that ambiguity is exactly what let a dead alert channel look like a quiet day.
+    let delivered = 0;
+    if (heartbeat) {
+      for (const r of receivers) {
+        const ok = (await send(r.token, r.chat, msg)).ok === true;
+        console.log(`  → ${r.label}: ${ok ? 'heartbeat sent' : 'heartbeat FAILED (recipient must DM the bot first)'}`);
+        if (ok) delivered++;
+      }
+    }
+    return { sent: 0, leads: 0, heartbeat, receivers: receivers.length, delivered, warnings: warnings.length };
   }
 
   const messages = buildReport(leads, when);
@@ -199,7 +214,7 @@ export async function notifyTelegram({ token, chat, county, preview = false, mar
   let anyOk = false;
   for (const r of receivers) {
     let ok = true;
-    for (const m of messages) ok = (await send(r.token, r.chat, m)) && ok;
+    for (const m of messages) ok = ((await send(r.token, r.chat, m)).ok === true) && ok;
     console.log(`  → ${r.label}: ${ok ? 'sent ' + leads.length : 'FAILED (recipient must DM the bot first)'}`);
     if (ok) anyOk = true;
   }
