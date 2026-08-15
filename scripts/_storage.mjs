@@ -22,9 +22,31 @@ export async function saveDocToStorage(sb, caseNumber, kind, buffer, log = () =>
   const safe = String(caseNumber).replace(/[^A-Za-z0-9._-]/g, '_');
   const path = `${safe}/${kind}.pdf`;
   try {
-    const { error } = await sb.storage.from(BUCKET).upload(path, buffer, { contentType: 'application/pdf', upsert: true });
+    // RETRY transient storage failures. Measured on the 2026-08-01 run: 149/388 cases showed as
+    // "no document" and the health check blamed the docket fetch — but the docket fetch was fine.
+    // The uploads were dying on "The connection to the database timed out", a transient Supabase
+    // Storage error that a single attempt turns into permanent data loss: complaint_url stays
+    // null, so the case is indistinguishable from one whose document never existed.
+    //
+    // The other failure, "The object exceeded the maximum allowed size", is NOT transient —
+    // Orange complaints reach 16 MB. Retrying that just wastes minutes, so it exits immediately
+    // and says so.
+    let error = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      ({ error } = await sb.storage.from(BUCKET).upload(path, buffer, { contentType: 'application/pdf', upsert: true }));
+      if (!error || /exists|duplicate/i.test(error.message || '')) break;
+      const msg = String(error.message || error);
+      if (/exceeded the maximum allowed size|too large|payload/i.test(msg)) {
+        log(`storage: ${caseNumber} ${kind} TOO LARGE (${(buffer.length / 1048576).toFixed(1)}MB) — not retrying`);
+        return null;
+      }
+      if (attempt < 3) {
+        log(`storage: ${caseNumber} ${kind} upload attempt ${attempt}/3 failed (${msg.slice(0, 60)}) — retrying`);
+        await new Promise(r => setTimeout(r, attempt * 4000));   // 4s, then 8s
+      }
+    }
     if (error && !/exists|duplicate/i.test(error.message || '')) {
-      log(`storage: ${caseNumber} ${kind} upload FAILED — ${String(error.message || error).slice(0, 160)}`);
+      log(`storage: ${caseNumber} ${kind} upload FAILED after 3 attempts — ${String(error.message || error).slice(0, 160)}`);
       return null;
     }
     const { data, error: signErr } = await sb.storage.from(BUCKET).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);

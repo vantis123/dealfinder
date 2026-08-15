@@ -1,0 +1,15 @@
+{
+  "enabled_counties": [
+    "Orange",
+    "Seminole",
+    "Lake",
+    "Polk",
+    "Volusia",
+    "Brevard",
+    "Osceola"
+  ],
+  "scan_time": "07:00",
+  "scan_days": "daily",
+  "timezone": "America/New_York",
+  "updated_at": "2026-07-28T00:02:41.741Z"
+}

@@ -1,0 +1,148 @@
+[
+  {
+    "county": "Lake",
+    "case": "35-2026-CA-001478-AXXX-01",
+    "kind": "value",
+    "ocr": true,
+    "docType": "value of property",
+    "lines": 53,
+    "labelCount": 0,
+    "addrCount": 2,
+    "hasLegalDescription": false,
+    "offsets": [],
+    "addresses": [
+      {
+        "line": 42,
+        "hit": "905 Value greater",
+        "full": "$905 Value greater than $50,000 but less than $250,000 with 5 defendants or less"
+      },
+      {
+        "line": 43,
+        "hit": "000 or greater",
+        "full": "$1,905 Value $250,000 or greater with 5 defendants or less"
+      }
+    ]
+  },
+  {
+    "county": "Lake",
+    "case": "35-2026-CA-001645-AXXX-01",
+    "kind": "complaint",
+    "ocr": true,
+    "docType": "complaint",
+    "lines": 119,
+    "labelCount": 10,
+    "addrCount": 0,
+    "hasLegalDescription": false,
+    "offsets": [
+      {
+        "label": "DIANE SUSAN GRAEBNER A/K/A",
+        "offset": null,
+        "value": null
+      },
+      {
+        "label": "DIANE S. GRAEBNER A/K/A DIANE",
+        "offset": null,
+        "value": null
+      },
+      {
+        "label": "DIANE SUSAN GRAEBNER A/K/A",
+        "offset": null,
+        "value": null
+      },
+      {
+        "label": "DIANE S. GRAEBNER A/K/A DIANE",
+        "offset": null,
+        "value": null
+      },
+      {
+        "label": "10, 2026, and the subject property is not the prin",
+        "offset": null,
+        "value": null
+      }
+    ],
+    "addresses": []
+  },
+  {
+    "county": "Lake",
+    "case": "35-2026-CA-001645-AXXX-01",
+    "kind": "value",
+    "ocr": true,
+    "docType": "value of property",
+    "lines": 57,
+    "labelCount": 2,
+    "addrCount": 1,
+    "hasLegalDescription": false,
+    "offsets": [
+      {
+        "label": "Defendant (s): DIANE SUSAN GRAEBNER A/K/A DIANE S.",
+        "offset": null,
+        "value": null
+      },
+      {
+        "label": "DECEASED; DIANE SUSAN GRAEBNER A/K/A DIANE S. GRAE",
+        "offset": null,
+        "value": null
+      }
+    ],
+    "addresses": [
+      {
+        "line": 35,
+        "hit": "6409 Congress Ave",
+        "full": "6409 Congress Ave., Suite 100"
+      }
+    ]
+  },
+  {
+    "county": "Lake",
+    "case": "35-2026-CA-001661-AXXX-01",
+    "kind": "complaint",
+    "ocr": true,
+    "docType": "complaint",
+    "lines": 138,
+    "labelCount": 3,
+    "addrCount": 0,
+    "hasLegalDescription": false,
+    "offsets": [
+      {
+        "label": "2. Venue is proper in this jurisdiction as the rea",
+        "offset": null,
+        "value": null
+      },
+      {
+        "label": "some interest in the subject property by virtue of",
+        "offset": null,
+        "value": null
+      },
+      {
+        "label": "LIABILITY COMPANY, may have or claim some interest",
+        "offset": null,
+        "value": null
+      }
+    ],
+    "addresses": []
+  },
+  {
+    "county": "Lake",
+    "case": "35-2026-CA-001661-AXXX-01",
+    "kind": "value",
+    "ocr": false,
+    "docType": "value of property",
+    "lines": 55,
+    "labelCount": 0,
+    "addrCount": 2,
+    "hasLegalDescription": false,
+    "offsets": [],
+    "addresses": [
+      {
+        "line": 44,
+        "hit": "905   Value greater",
+        "full": "$905   Value greater than $50,000 but less than $250,000 with 5 defendants or less"
+      },
+      {
+        "line": 45,
+        "hit": "000 or greater",
+        "full": "$1,905 Value $250,000 or greater with 5 defendants or less"
+      }
+    ]
+  }
+]

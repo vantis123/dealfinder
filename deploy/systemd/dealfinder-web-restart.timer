@@ -1,0 +1,16 @@
+[Unit]
+Description=Restart dealfinder-web nightly at 03:15 ET (memory-leak reset)
+
+[Timer]
+# Measured 2026-08-05: the dashboard leaks ~0.42 GB/day (4.6G peak over ~11 days uptime on only
+# 91 min of CPU — monotonic accumulation, not scan-correlated). Left alone it reaches MemoryMax
+# in ~19 days and dies at a moment nobody chose. A nightly restart costs ~6s of downtime at a
+# time WE pick, keeps RSS near its ~100M baseline, and is boringly reversible — the
+# graduate-to-deterministic-code answer instead of the clever one.
+# 03:15 is deliberately clear of the 07:00 daily scan.
+OnCalendar=*-*-* 03:15:00 America/New_York
+Persistent=false
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

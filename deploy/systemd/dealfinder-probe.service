@@ -1,0 +1,25 @@
+[Unit]
+Description=DealFinder liveness probe — fast reachability + crash-loop check (same script as dealfinder-health, --probe mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vantis
+Group=vantis
+WorkingDirectory=/srv/vantis-hq/2-dealfinder/dealfinder-standalone
+Environment=HOME=/home/vantis
+Environment=PATH=/home/vantis/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/srv/vantis-hq/2-dealfinder/dealfinder-standalone/.env
+# Same reason as dealfinder-health.service: .env carries ANTHROPIC_API_KEY for the legacy
+# metered path and the claude CLI prefers it over the Max subscription. The probe never calls
+# claude, but keep the two units identical so they cannot drift.
+UnsetEnvironment=ANTHROPIC_API_KEY
+# Debounce state must survive between oneshot runs -> /var/lib/dealfinder, owned by vantis.
+StateDirectory=dealfinder
+ExecStart=/usr/bin/node scripts/healthcheck.mjs --probe
+# Exit 1 means "probe found the site down and reported it" — a successful check, not a unit failure.
+SuccessExitStatus=0 1
+TimeoutStartSec=2m
+StandardOutput=append:/var/log/dealfinder/health.log
+StandardError=append:/var/log/dealfinder/health.log

@@ -1,0 +1,6 @@
+[Unit]
+Description=Scheduled restart of dealfinder-web to reset its memory leak
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart dealfinder-web.service

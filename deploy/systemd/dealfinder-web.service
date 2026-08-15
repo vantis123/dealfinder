@@ -1,0 +1,39 @@
+[Unit]
+Description=DealFinder dashboard (Next.js) — VPS, canonical host for the dashboard
+After=network-online.target
+Wants=network-online.target
+# Never give up. systemd default (5 starts / 10s) would permanently abandon a fast crash-loop,
+# which is the same silent-death this unit was fixed to eliminate. An infinite retry that the
+# probe PAGES about beats a finite retry that goes quiet.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=vantis
+Group=vantis
+WorkingDirectory=/srv/vantis-hq/2-dealfinder/dealfinder-standalone
+Environment=HOME=/home/vantis
+Environment=NODE_ENV=production
+Environment=PORT=3001
+EnvironmentFile=/srv/vantis-hq/2-dealfinder/dealfinder-standalone/.env
+ExecStart=/usr/bin/npm run start
+# Was Restart=unless-stopped — a DOCKER directive. systemd could not parse it and IGNORED it,
+# so this service had NO restart policy at all and any death was permanent. Fixed 2026-08-05.
+Restart=always
+RestartSec=5
+MemoryAccounting=yes
+# MemoryMax is a genuine backstop only: a runaway is capped at ~53% of the 15Gi box so it can
+# never take the host down. Recovery from this path was PROVEN live 2026-08-05 (forced OOM at
+# 60M: "Failed with result oom-kill" -> "Scheduled restart job" -> back up), which matters
+# because OOMPolicy=stop could plausibly have stopped the unit instead.
+MemoryMax=8G
+# NO MemoryHigh. It throttles rather than kills: the cgroup enters aggressive reclaim, the Node
+# event loop stalls, and the process stays ALIVE and "active (running)" while answering in
+# 30s+. Restart=always only fires on EXIT, so it would be blind to that hang. A soft limit here
+# would have converted a fat service into a catatonic one that systemd reports as healthy.
+# The leak is handled deterministically by dealfinder-web-restart.timer instead.
+StandardOutput=append:/var/log/dealfinder/web.log
+StandardError=append:/var/log/dealfinder/web.log
+
+[Install]
+WantedBy=multi-user.target

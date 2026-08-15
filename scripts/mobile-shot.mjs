@@ -1,6 +1,12 @@
 // Screenshot the live dashboard at iPhone width to verify mobile layout.
 import { Camoufox } from 'camoufox-js';
-const BASE = 'https://web-production-a8fce.up.railway.app';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { loadEnv } from './_env.mjs';
+// Canonical VPS URL (2026-08-05), overridable via DEAL_FINDER_URL. The old hardcoded Railway host
+// was DEAD (404) with no env override — this had been screenshotting a 404 page since Railway died.
+const BASE = loadEnv(join(dirname(fileURLToPath(import.meta.url)), '..')).DEAL_FINDER_URL
+  || 'https://dealfinder.srv1856446.hstgr.cloud';
 const OUT = '/tmp/df-recon';
 const ctx = await Camoufox({ headless: true, user_data_dir: '/tmp/df-recon/mobile-cf',
   window: { width: 390, height: 844 } });

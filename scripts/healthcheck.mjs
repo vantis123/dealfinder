@@ -19,10 +19,11 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { execFile } from 'node:child_process';
-import { existsSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { loadEnv } from './_env.mjs';
+import { send as tgSend, esc } from './notify-telegram.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const env = loadEnv(ROOT);
@@ -34,9 +35,190 @@ const warnings = [];   // things that will break soon
 const fail = (area, msg) => problems.push(`❌ *${area}* — ${msg}`);
 const warn = (area, msg) => warnings.push(`⚠️ *${area}* — ${msg}`);
 
+// The `claude` CLI treats ANTHROPIC_API_KEY as an auth source and PREFERS it over the Max
+// subscription login — with it set, every call dies on "Credit balance is too low" even
+// though the subscription is healthy. .env carries it for the legacy metered path, so strip
+// it here rather than depending on every caller's environment being clean.
+delete process.env.ANTHROPIC_API_KEY;
+
 const sh = (cmd, args, timeout = 60000) => new Promise(r =>
   execFile(cmd, args, { timeout, maxBuffer: 4e6 }, (e, so, se) =>
     r({ ok: !e, out: String(so || ''), err: String(se || e?.message || '') })));
+
+// ── PROBE MODE (`--probe` / `--uptime`) — same script, second cadence ──────────
+// The deep checks below run 2x/day. That cadence cannot catch "the site died at 09:00 and
+// nobody knew until 20:00" — and 2026-07-12→14 proved silence reads as health. So the SAME
+// script has a fast mode, run every 2 minutes by dealfinder-probe.timer:
+//   · hits the two endpoints a user actually needs (dashboard page + deals API), asserting
+//     HTTP 200 AND a body that looks like the real app — a 200 error shell is still DOWN
+//   · debounced: alerts only after PROBE_FAILS consecutive failures (default 3 ≈ 6 min), so
+//     the ~6s Restart=always respawn blip never pages anyone
+//   · alerts on TRANSITION, reminds hourly while down, and sends a recovery message with the
+//     outage duration — but only if a down alert actually went out
+//   · dead-man's-switch: pages if the 07:00 daily scan has no SUCCESS in 26h, and yellow-flags
+//     a completed scan that reported 0 new leads (the silent-zero failure mode)
+// Each probe is a oneshot process, so debounce state lives on disk (StateDirectory=dealfinder
+// → /var/lib/dealfinder, writable by the `vantis` user the unit runs as).
+// Alerts reuse notify-telegram's send() — one Telegram client — but are styled DF OPS with
+// traffic-light emoji so a system page never looks like the daily 🚪 lead report. They go to
+// the primary chat only (same audience as the deep-check alerts; partners on
+// TELEGRAM_RECEIVERS get leads, not pager noise).
+// Test knobs: PROBE_BASE=http://127.0.0.1:9 forces failure without touching the real site;
+// PROBE_STATE, PROBE_FAILS, PROBE_REMIND_MIN, PROBE_HEARTBEAT_MAX_H override defaults.
+if (process.argv.includes('--probe') || process.argv.includes('--uptime')) {
+  await runProbe();
+  process.exit(process.exitCode || 0);
+}
+
+async function runProbe() {
+  const BASE = process.env.PROBE_BASE || 'http://127.0.0.1:3001';
+  const NFAILS = Math.max(2, parseInt(process.env.PROBE_FAILS || '3', 10));
+  const REMIND_MS = parseInt(process.env.PROBE_REMIND_MIN || '60', 10) * 60000;
+  const HB_MAX_MS = parseFloat(process.env.PROBE_HEARTBEAT_MAX_H || '26') * 3600000;
+  const STATE = process.env.PROBE_STATE || '/var/lib/dealfinder/probe-state.json';
+  const token = env.TELEGRAM_BOT_TOKEN, chat = env.TELEGRAM_CHAT_ID;
+  const now = Date.now();
+  const et = ts => new Date(ts).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const mins = ms => { const m = Math.round(ms / 60000); return m < 120 ? `${m} min` : `${(ms / 3600000).toFixed(1)}h`; };
+
+  let st = {};
+  try { st = JSON.parse(readFileSync(STATE, 'utf8')) || {}; } catch { /* first run — empty state */ }
+
+  const ops = async text => {
+    if (!token || !chat) { log('probe: no TELEGRAM_BOT_TOKEN/CHAT_ID — cannot alert'); return { ok: false }; }
+    const r = await tgSend(token, chat, text);
+    log('probe: telegram →', JSON.stringify(r).slice(0, 300));
+    return r;
+  };
+
+  // ── uptime: HTTP 200 + a body that is actually the app ──
+  // Timeouts are deliberately TIGHT. A Node process under MemoryHigh reclaim pressure stays
+  // alive and `active (running)` while taking 30s+ to answer — Restart=always never fires
+  // because nothing exited. SLOW MUST FAIL, not just dead, or the hang is invisible.
+  const TMO = parseInt(process.env.PROBE_TIMEOUT_MS || '5000', 10);
+  const failures = [];
+  try {
+    const r = await fetch(BASE + '/foreclosures', { signal: AbortSignal.timeout(TMO) });
+    const body = await r.text();
+    if (r.status !== 200) failures.push(`/foreclosures → HTTP ${r.status}`);
+    else if (body.length < 3000 || !/<!doctype html>/i.test(body) || !body.includes('/_next/'))
+      failures.push(`/foreclosures → 200 but body is not the app (${body.length}B)`);
+  } catch (e) { failures.push(`/foreclosures → unreachable (${String(e.cause?.code || e.message).slice(0, 40)})`); }
+  try {
+    const r = await fetch(BASE + '/api/deals', { signal: AbortSignal.timeout(TMO * 2) });
+    const body = await r.text();
+    let j = null; try { j = JSON.parse(body); } catch { /* not JSON = broken */ }
+    if (r.status !== 200) failures.push(`/api/deals → HTTP ${r.status}`);
+    else if (!Array.isArray(j?.deals)) failures.push('/api/deals → 200 but no deals[] payload');
+    else if (j.deals.length === 0) failures.push('/api/deals → 0 deals — DB empty or query broken');
+  } catch (e) { failures.push(`/api/deals → unreachable (${String(e.cause?.code || e.message).slice(0, 40)})`); }
+
+  // ── PUBLIC vantage: the path a human actually uses ──
+  // The 127.0.0.1 checks above prove the PROCESS is alive. They are structurally blind to the
+  // box being unreachable from OUTSIDE — DNS gone, traefik down, cert expired, firewall shut.
+  // That is precisely the failure Phillip reported on 2026-08-05: the process was fine, but he
+  // had no working URL. A local-only probe would have reported "all healthy" that whole time.
+  const PUBLIC = String(env.DEAL_FINDER_URL || '').replace(/\/+$/, '');
+  if (PUBLIC && !PUBLIC.startsWith(BASE)) {
+    try {
+      const r = await fetch(PUBLIC + '/foreclosures', { signal: AbortSignal.timeout(TMO * 2), redirect: 'follow' });
+      const body = await r.text();
+      if (r.status !== 200) failures.push(`public ${PUBLIC} → HTTP ${r.status}`);
+      else if (body.length < 3000 || !body.includes('/_next/'))
+        failures.push(`public ${PUBLIC} → 200 but body is not the app (${body.length}B)`);
+    } catch (e) { failures.push(`public ${PUBLIC} → unreachable (${String(e.cause?.code || e.message).slice(0, 40)}) — DNS/traefik/TLS, not the app`); }
+  }
+
+  if (failures.length) {
+    st.consecFails = (st.consecFails || 0) + 1;
+    st.downSince = st.downSince || now;
+    st.lastFailures = failures;
+    log(`probe: FAIL ${st.consecFails}/${NFAILS} — ${failures.join(' · ')}`);
+    if (st.consecFails >= NFAILS && !st.alertedAt) {
+      await ops([
+        '🔴 <b>DF OPS — SITE DOWN</b>',
+        ...failures.map(f => `• ${esc(f)}`),
+        `${st.consecFails} consecutive probe failures since ${et(st.downSince)} ET. Reminders hourly until it recovers.`,
+        '<code>systemctl status dealfinder-web</code> · <code>tail -30 /var/log/dealfinder/web.log</code>',
+      ].join('\n'));
+      st.alertedAt = now; st.lastReminderAt = now;
+    } else if (st.alertedAt && now - (st.lastReminderAt || 0) >= REMIND_MS) {
+      await ops(`🔴 <b>DF OPS — STILL DOWN</b>\nDown ${mins(now - st.downSince)} (since ${et(st.downSince)} ET).\n${failures.map(f => `• ${esc(f)}`).join('\n')}`);
+      st.lastReminderAt = now;
+    }
+  } else {
+    if (st.alertedAt) {
+      await ops(`🟢 <b>DF OPS — RECOVERED</b>\nSite is back up after ${mins(now - st.downSince)} down (since ${et(st.downSince)} ET).`);
+    }
+    if (st.consecFails) log(`probe: OK again after ${st.consecFails} fail(s)${st.alertedAt ? '' : ' — blip, below alert threshold, no page sent'}`);
+    delete st.downSince; delete st.alertedAt; delete st.lastReminderAt; delete st.lastFailures;
+    st.consecFails = 0;
+    st.lastOkAt = now;
+  }
+
+  // ── crash-loop: the check without which this whole watchdog is decorative ──
+  // A service dying and respawning on RestartSec=5 boots in ~280ms, so it serves HTTP 200 for
+  // ~4.7 of every 5.3 seconds — about 88% of the time. A point-in-time probe therefore reads a
+  // PERMANENT crash-loop as perfectly healthy, at any polling interval. NRestarts is the only
+  // honest signal. It counts AUTOMATIC restarts only — a deliberate `systemctl restart` does not
+  // bump it — so any increase between probes means the service died on its own.
+  try {
+    const r = await sh('systemctl', ['show', 'dealfinder-web.service', '-p', 'NRestarts', '-p', 'ActiveState'], 10000);
+    const nr = Number((r.out.match(/NRestarts=(\d+)/) || [])[1] ?? NaN);
+    const state = (r.out.match(/ActiveState=(\S+)/) || [])[1] || 'unknown';
+    if (Number.isFinite(nr)) {
+      if (Number.isFinite(st.lastRestarts) && nr > st.lastRestarts) {
+        const n = nr - st.lastRestarts;
+        await ops([
+          '🔁 <b>DF OPS — CRASH LOOP</b>',
+          `<code>dealfinder-web</code> auto-restarted <b>${n}×</b> since the last probe (NRestarts ${st.lastRestarts}→${nr}); systemd reports <code>${esc(state)}</code>.`,
+          'It is flapping, not stable — a passing HTTP check does NOT mean healthy here.',
+          '<code>journalctl -u dealfinder-web -n 50 --no-pager</code>',
+        ].join('\n'));
+      }
+      st.lastRestarts = nr;
+    }
+  } catch { /* systemctl unavailable — HTTP checks above still stand */ }
+
+  // ── dead-man's-switch: the 07:00 daily scan must keep proving it ran ──
+  // systemd is the source of truth for "did the unit finish, and with what exit":
+  // scan-status.json is rewritten by ad-hoc/settings scans (verified 2026-08-05 — file said
+  // 19:38 while the daily ran 07:02) and daily.log rotates weekly, so neither pins down the
+  // TIMER's own outcome. ExecMainExitTimestamp clears on reboot, so the newest success seen
+  // is persisted in probe state and survives restarts.
+  try {
+    const r = await sh('systemctl', ['show', 'dealfinder-daily.service', '-p', 'ExecMainExitTimestamp', '-p', 'ExecMainStatus', '-p', 'Result'], 10000);
+    const p = Object.fromEntries(r.out.trim().split('\n').map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+    const ts = Date.parse(String(p.ExecMainExitTimestamp || '').replace(/^[A-Za-z]+ /, ''));
+    if (Number.isFinite(ts) && p.ExecMainStatus === '0' && p.Result === 'success' && ts > (st.lastDailySuccess || 0)) st.lastDailySuccess = ts;
+  } catch { /* systemctl unavailable — fall back to last persisted success */ }
+  if (!st.lastDailySuccess) st.lastDailySuccess = now; // first install arms the switch from now
+  if (now - st.lastDailySuccess > HB_MAX_MS) {
+    if (!st.hbAlertedAt || now - st.hbAlertedAt >= 24 * 3600000) {
+      await ops(`🟠 <b>DF OPS — DAILY SCAN MISSING</b>\nNo successful daily scan for ${mins(now - st.lastDailySuccess)} (expected 07:00 ET; last success ${et(st.lastDailySuccess)} ET). Absence of the report is itself the alarm.\n<code>systemctl status dealfinder-daily</code> · <code>tail -40 /var/log/dealfinder/daily.log</code>`);
+      st.hbAlertedAt = now;
+    }
+  } else delete st.hbAlertedAt;
+
+  // ── silent-zero: scan COMPLETED but reported nothing — how Jul 12–14 read as "quiet days" ──
+  // The daily run logs its own notify result (`telegram: {"sent":N,...}`); a completed run with
+  // sent:0 gets ONE yellow flag for that date, so a real quiet day costs one glance, and a dead
+  // valuation pipeline can no longer hide behind three of them.
+  try {
+    const dl = readFileSync('/var/log/dealfinder/daily.log', 'utf8');
+    const m = [...dl.matchAll(/^(\d{4}-\d{2}-\d{2})T[\d:]+ telegram: (\{.*\})$/gm)].pop();
+    if (m && now - st.lastDailySuccess < HB_MAX_MS) {
+      const sent = JSON.parse(m[2]).sent ?? null;
+      if (sent === 0 && st.zeroFlaggedDate !== m[1]) {
+        await ops(`🟡 <b>DF OPS — SCAN RAN, 0 FLAGGED</b>\nThe ${m[1]} scan completed but flagged 0 new leads. Could be a quiet day — could be the Jul 12 silent-zero mode (valuation dead → nothing flags). Spot-check: <code>tail -40 /var/log/dealfinder/daily.log</code>`);
+        st.zeroFlaggedDate = m[1];
+      }
+    }
+  } catch { /* log missing/rotated — the dead-man's-switch above still covers absence */ }
+
+  try { mkdirSync(dirname(STATE), { recursive: true }); writeFileSync(STATE, JSON.stringify(st, null, 2)); }
+  catch (e) { log('probe: CANNOT WRITE STATE', STATE, '—', e.message, '— debounce is broken until perms are fixed'); process.exitCode = 1; }
+}
 
 // ── 1. Apify: every account in the rotation ────────────────────────────────────
 // A capped account is not an error until ALL of them are capped — that's the whole point of
@@ -116,7 +298,11 @@ if (env.CAPSOLVER_API_KEY) {
   if (total) {
     const docGapPct = Math.round(100 * noDoc / total);
     const addrPct = Math.round(100 * withAddr / total);
-    if (docGapPct > 30) fail('Documents', `${noDoc}/${total} cases (${docGapPct}%) have NO document saved — the docket fetch is failing`);
+    // Say WHAT is broken, not what we assume is broken. On 2026-08-01 this read "the docket
+    // fetch is failing" and sent Phillip after the scraper — but the scraper was fine. The
+    // documents downloaded and then failed to UPLOAD to Supabase Storage (timeouts, plus files
+    // over the size limit). A diagnosis in an alert is a claim; make it point at evidence.
+    if (docGapPct > 30) fail('Documents', `${noDoc}/${total} cases (${docGapPct}%) have no document stored — check \`grep "upload FAILED" /var/log/dealfinder/daily.log\` for storage errors before suspecting the scraper`);
     if (addrPct < 30) fail('Extraction', `only ${addrPct}% of cases have an address — parser or docs are broken`);
     else if (addrPct < 45) warn('Extraction', `${addrPct}% of cases have an address`);
   }

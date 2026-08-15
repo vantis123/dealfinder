@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { cached, peek } from "@/lib/response-cache";
 
 // Auctions read from the DEDICATED `auction_leads` table — never mixed with the clerk
 // pre-foreclosure `foreclosure_leads` (which /api/foreclosures serves).
@@ -12,15 +13,21 @@ const sb = createClient(
 const num = (v: any) => (v != null ? Number(v) : null);
 
 // GET — auction listings, worth-it first then by spread. Returns a plain array (the /auctions page maps it).
-export async function GET() {
+//
+// 20s stale-while-revalidate cache — see lib/response-cache.ts for why:
+// Supabase's own internal metrics query periodically saturates this
+// project's DB compute, making every query (even on tiny tables) take
+// 8-30s+. This keeps the dashboard responsive off the last-known-good list.
+const CACHE_KEY = "auctions:all";
+async function fetchAuctions() {
   const { data, error } = await sb
     .from("auction_leads")
     .select("*")
     .not("property_address", "is", null)   // no real address = not actionable = don't show
     .order("flagged", { ascending: false, nullsFirst: false })
     .order("spread", { ascending: false, nullsFirst: false });
-  if (error) return NextResponse.json([], { status: 200 });
-  const rows = (data || []).filter((r: any) => String(r.property_address || "").trim()).map((r: any) => ({
+  if (error) throw new Error(error.message);
+  return (data || []).filter((r: any) => String(r.property_address || "").trim()).map((r: any) => ({
     caseNumber: r.case_number,
     county: r.county,
     auctionDate: r.auction_date,
@@ -43,7 +50,15 @@ export async function GET() {
     foundAt: r.scanned_at || r.updated_at || null,
     knock: { status: r.knock_status || "new", note: r.knock_note || "" },
   }));
-  return NextResponse.json(rows);
+}
+
+export async function GET() {
+  try {
+    const { data: rows } = await cached(CACHE_KEY, 20000, fetchAuctions, 10000);
+    return NextResponse.json(rows);
+  } catch {
+    return NextResponse.json(peek<Awaited<ReturnType<typeof fetchAuctions>>>(CACHE_KEY) || []);
+  }
 }
 
 // POST — update knock status / note for an auction case.

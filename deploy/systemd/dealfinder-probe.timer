@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the DealFinder liveness probe every 2 minutes
+
+[Timer]
+# The deep audit (dealfinder-health.timer) stays at 08:00/20:00 ET — it calls claude, Apify and
+# CapSolver and must NOT run on a fast cadence or the monitor becomes the outage. This timer runs
+# ONLY the cheap --probe path: two local HTTP gets, one public HTTPS get, one systemctl read.
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

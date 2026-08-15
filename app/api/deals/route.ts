@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { cached, peek } from "@/lib/response-cache";
 
 // The unified `deals` spine — every source (preforeclosure, auction, future code_violation…)
 // normalizes into this one table. CRM boards read/filter this; changing a deal's stage moves it.
@@ -38,16 +39,29 @@ function toDeal(r: any) {
 }
 
 // GET /api/deals?source=preforeclosure|auction|all  → all deals (worth-it first, then spread)
+//
+// Wrapped in a 20s stale-while-revalidate cache: Supabase's own internal
+// metrics query (application_name=postgres_exporter) periodically saturates
+// this project's DB compute, making every query — even trivial ones — take
+// 8-30s+. We can't cancel that backend (permission denied, it holds
+// SUPERUSER and our role doesn't). This cache means the dashboard keeps
+// showing the last-known-good list (marked `stale`) instead of spinning
+// forever while a background refresh races the slow DB.
 export async function GET(req: Request) {
   const source = new URL(req.url).searchParams.get("source");
-  let q = sb.from("deals").select("*");
-  if (source && source !== "all") q = q.eq("source_type", source);
-  const { data, error } = await q
-    .order("flagged", { ascending: false, nullsFirst: false })
-    .order("spread", { ascending: false, nullsFirst: false });
-  if (error) return NextResponse.json({ deals: [], error: error.message });
-  const deals = (data || []).map(toDeal);
-  return NextResponse.json({
+  const key = `deals:${source || "all"}`;
+
+  const fetchDeals = async () => {
+    let q = sb.from("deals").select("*");
+    if (source && source !== "all") q = q.eq("source_type", source);
+    const { data, error } = await q
+      .order("flagged", { ascending: false, nullsFirst: false })
+      .order("spread", { ascending: false, nullsFirst: false });
+    if (error) throw new Error(error.message);
+    return (data || []).map(toDeal);
+  };
+
+  const buildBody = (deals: ReturnType<typeof toDeal>[], stale: boolean, error?: string) => ({
     deals,
     stats: {
       total: deals.length,
@@ -55,7 +69,18 @@ export async function GET(req: Request) {
       duplicates: deals.filter((d) => d.duplicate).length,
       equity: deals.filter((d) => d.flagged).reduce((s, d) => s + (d.spread || 0), 0),
     },
+    ...(stale ? { stale: true } : {}),
+    ...(error ? { error } : {}),
   });
+
+  try {
+    const { data: deals, stale } = await cached(key, 20000, fetchDeals, 10000);
+    return NextResponse.json(buildBody(deals, stale));
+  } catch (e: any) {
+    const fallback = peek<ReturnType<typeof toDeal>[]>(key);
+    if (fallback) return NextResponse.json(buildBody(fallback, true, "upstream-slow"));
+    return NextResponse.json(buildBody([], false, e?.message || "upstream-timeout"));
+  }
 }
 
 // POST /api/deals  { id, stage?, status?, note? }  → move a deal to a stage / update status/note

@@ -56,6 +56,12 @@ const CORPUS = join(CORPUS_DIR, 'extraction-corpus.jsonl');
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), '[ai]', ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// The `claude` CLI treats ANTHROPIC_API_KEY as an auth source and PREFERS it over the Max
+// subscription login — with it set, every call dies on "Credit balance is too low" even
+// though the subscription is healthy. .env carries it for the legacy metered path, so strip
+// it here rather than depending on every caller's environment being clean.
+delete process.env.ANTHROPIC_API_KEY;
+
 function sh(cmd, args, { timeout = 240000, input } = {}) {
   return new Promise(resolve => {
     const c = execFile(cmd, args, { timeout, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) =>
@@ -139,7 +145,25 @@ function corpusSnippet(text) {
 async function extractOne(row) {
   const safe = row.case_number.replace(/[^A-Za-z0-9._-]/g, '_');
   let file = null, used = null;
-  for (const kind of ['complaint', 'value']) {
+  // Lis Pendens FIRST. By Florida law it carries the legal description plus "Also known as:
+  // <street address>", it is one page, and it is always public — whereas a complaint may be
+  // gated to page 1 (Polk does this when the note/mortgage are confidential exhibits), and
+  // page 1 holds only the plaintiff's business address. Reading the complaint first is how
+  // you end up extracting a lender's headquarters instead of the house.
+  // COMPLAINT FIRST. The 2026-07-29 format sweep read real filings in all five counties and the
+  // answer was unanimous — the complaint is where the property address lives:
+  //   Polk      "See Mortgage. Exhibit B hereto. The Property is located at 1336 Madison Circle"
+  //   Orange    "Property Address:        5450 GAYMAR DR" / "5450 GAYMAR DR, ORLANDO, FL 32818"
+  //   Osceola   "which currently has the address of 3521 Anibal St, Kissimmee, FL 34746"
+  //   Seminole  "638 King Harold Ct. Oviedo, FL 32765 (the “Property”)"
+  //
+  // Lis Pendens is only a FALLBACK: Polk's carries a legal description and no street address at
+  // all, which contradicts the note in counties.mjs. An earlier version of this loop put it
+  // first and consequently read the wrong document for every Polk case that had one.
+  //
+  // value.pdf is NEVER read for an address — it is the "Value of Real Property" filing-fee
+  // affidavit. Identical in every county, and the only address on it is the law firm's.
+  for (const kind of ['complaint', 'lispendens']) {
     const { data } = await sb.storage.from('foreclosure-docs').download(`${safe}/${kind}.pdf`);
     if (!data) continue;
     file = `/tmp/aix-${safe}-${kind}.pdf`;
@@ -188,15 +212,21 @@ async function extractOne(row) {
       return { case: row.case_number, ai, verified: null, disqualified: 'timeshare' };
     }
 
-    // Only persist an address the appraiser can confirm — an unverified one is worse than none,
-    // because it silently sends someone to knock the wrong door.
-    if (ai.propertyAddress && verified) {
-      const patch = {
-        property_address: ai.propertyAddress,
-        assessed_value: verified.assessed, assessed_year: verified.year,
-        parcel_id: verified.parcelId, is_homestead: verified.isHomestead,
-        updated_at: new Date().toISOString(),
-      };
+    // Orange: only persist an address the appraiser can confirm — an unverified one is worse
+    // than none, because it silently sends someone to knock the wrong door.
+    // Other counties: no appraiser adapter exists yet, so accept the address and let the
+    // valuation step be the check. Recorded honestly via value_source so the two are never
+    // conflated when someone asks how a lead was sourced.
+    // Only Orange has an appraiser adapter today (verifyWithAppraiser hits OCPA). Every other
+    // county appraiser is a different vendor needing its own endpoint discovery.
+    const hasAdapter = row.county === 'Orange';
+    if (ai.propertyAddress && (verified || !hasAdapter)) {
+      const patch = { property_address: ai.propertyAddress, updated_at: new Date().toISOString() };
+      if (verified) {
+        patch.assessed_value = verified.assessed; patch.assessed_year = verified.year;
+        patch.parcel_id = verified.parcelId; patch.is_homestead = verified.isHomestead;
+      }
+      patch.review_reason = verified ? null : 'ai-extracted, appraiser unverified';
       if (ai.principalDue != null) {
         patch.principal_due = ai.principalDue;
         const total = Number(ai.principalDue) + Number(ai.interestOwed || 0);
@@ -209,9 +239,14 @@ async function extractOne(row) {
   } finally { try { unlinkSync(file); } catch {} }
 }
 
+// Any county, not just Orange. AI_COUNTY=Polk to target one. Appraiser verification is
+// Orange-only for now (each county appraiser is a different vendor and needs its own endpoint
+// discovery), so for other counties the address is saved without a parcel check and the
+// downstream Zillow/Apify valuation acts as the reality test instead.
+const COUNTY = process.env.AI_COUNTY || 'Orange';
 let q = sb.from('foreclosure_leads')
   .select('case_number, county, property_address')
-  .eq('county', 'Orange').not('complaint_url', 'is', null).is('property_address', null).limit(MAX);
+  .eq('county', COUNTY).is('property_address', null).limit(MAX);
 if (ONE) q = sb.from('foreclosure_leads').select('case_number, county, property_address').eq('case_number', ONE);
 const { data, error } = await q;
 if (error) { log('query failed:', error.message); process.exit(1); }
@@ -226,7 +261,10 @@ for (const r of rows) {
   if (!res.ai?.propertyAddress) { missed++; log(`  ${res.case}: AI found no address`); continue; }
   got++;
   if (res.verified) { verified++; log(`  ${res.case}: ${res.ai.propertyAddress}  ✓ parcel ${res.verified.parcelId}  assessed $${(res.verified.assessed || 0).toLocaleString()}`); }
-  else log(`  ${res.case}: ${res.ai.propertyAddress}  ✗ appraiser could not confirm — NOT saved`);
+  // Only Orange has an appraiser to verify against, so "unverified" means "no adapter for this
+  // county" far more often than it means "suspicious address". Saying NOT SAVED for a row that
+  // WAS saved is the kind of wrong log line that sends someone debugging a non-problem.
+  else log(`  ${res.case}: ${res.ai.propertyAddress}  ${res.case.startsWith('2026-CA') ? '✗ appraiser could not confirm — NOT saved' : '⚠ saved, no appraiser adapter for this county'}`);
   await sleep(1000);
 }
 log(`done — AI found ${got}/${rows.length} | appraiser-verified ${verified} | no result ${missed}`);

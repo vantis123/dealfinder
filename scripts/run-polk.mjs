@@ -253,7 +253,17 @@ try {
         // "Also known as: <street address>" — the reliable, cheap address source. Fall back to the complaint.
         if (lis) {
           const buf = await downloadDoc(p, lis.token, lis.seq);
-          if (buf) { const f = join(tmpdir(), `polk-l-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf); rec.propertyAddress = await addr(f); try { unlinkSync(f); } catch (e) {} }
+          if (buf) {
+            const f = join(tmpdir(), `polk-l-${rec.caseNumber.replace(/[^A-Za-z0-9]/g, '')}.pdf`); writeFileSync(f, buf);
+            // PERSIST IT. This used to be read once and deleted, so when addr() failed — which it
+            // does on every scanned Lis Pendens while USE_AI=0 — the ONLY document containing the
+            // property address was gone, and the case could never be recovered without re-scraping
+            // the county. Measured 2026-07-26: 52 of 59 Polk cases sat at review_reason='no_address'
+            // holding a complaint.pdf that is legally gated to page 1 and has no address on it.
+            rec.lisPendensUrl = await saveDocToStorage(sb, rec.caseNumber, 'lispendens', buf, log) || null;
+            rec.propertyAddress = await addr(f);
+            try { unlinkSync(f); } catch (e) {}
+          }
         }
         if (!rec.propertyAddress && cmpFile) rec.propertyAddress = await addr(cmpFile);
         if (cmpFile) { try { unlinkSync(cmpFile); } catch (e) {} }
