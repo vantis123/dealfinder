@@ -155,6 +155,14 @@ function assemble(lines, i, { anchored = false } = {}) {
 
 const LABEL = /(street address|property address|commonly known as|also known as|a\/k\/a|subject property)/i;
 
+// Central Florida ZIP prefixes — the operating area plus neighbours.
+//   321 Volusia · 327 Orlando metro/Seminole/Volusia/Lake · 328 Orlando · 329 Brevard
+//   338 Polk · 344 Marion · 345/346 Sumter/Hernando · 347 Osceola/Kissimmee/Winter Garden/Clermont
+// This is what makes the bare-guess rule below safe to re-enable: the dangerous answers it used to
+// produce were Sunrise / Fort Lauderdale / Boca law-firm addresses, and every one of them fails here.
+const REGION = ['321','327','328','329','338','344','345','346','347'];
+const inRegion = a => { const m = String(a).match(/\b(\d{5})(?:-\d{4})?\b/g); const z = m && m[m.length-1]; return !!z && REGION.some(p => z.startsWith(p)); };
+
 // Every prose form observed in the 2026-07-29 format sweep, verbatim from real filings:
 //   Polk     "See Mortgage. Exhibit B hereto. The Property is located at 1336 Madison Circle, Haines City."
 //   Osceola  "which currently has the address of 3521 Anibal St, Kissimmee, FL 34746"
@@ -216,10 +224,19 @@ export function addressFromText(text) {
   // For a door-knock list, precision beats recall: a wrong address sends a person to a
   // stranger's house, while a missing one just falls through to the AI pass. Re-enable with
   // BARE_GUESS=1 only if a county is verified to need it.
-  if (process.env.BARE_GUESS === '1') {
+  // RE-ENABLED 2026-08-15, now gated on the Central FL region.
+  // It was disabled because on 18 real PDFs it produced 4 correct answers and 3 dangerous ones —
+  // law-firm addresses in Sunrise and Fort Lauderdale (Broward filing hubs, never the property).
+  // Those are exactly what inRegion() rejects, so the reason for disabling it is now handled.
+  // The cost of leaving it off was measured: ORANGE sits at 47% addressed with 247 leads missing,
+  // and its documents routinely carry a clean unlabelled address on its own line —
+  //   "2914 RODRICK CIR, ORLANDO, FLORIDA 32824"   (twice in 2026-CA-008612-O, no label anywhere)
+  // Still deliberately strict: must START the line, survive NEVER + PROSE_WORDS, name Florida,
+  // AND carry an in-region ZIP. Set BARE_GUESS=0 to turn it back off.
+  if (process.env.BARE_GUESS !== '0') {
     for (let i = 0; i < lines.length; i++) {
       const a = assemble(lines, i, { anchored: true });
-      if (isPlausible(a) && /\bFL\b|FLORIDA/i.test(a)) return { address: a, how: 'bare' };
+      if (isPlausible(a) && /\bFL\b|FLORIDA/i.test(a) && inRegion(a)) return { address: a, how: 'bare-region' };
     }
   }
   return { address: null, how: null };
