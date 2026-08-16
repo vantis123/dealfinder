@@ -53,7 +53,28 @@ SELECT 'auction:'||case_number,'auction',case_number,county,property_address,COA
 FROM auction_leads WHERE property_address IS NOT NULL AND btrim(property_address) <> '' ${onconf}`);
 
 // No real address = not actionable = not in the CRM. Purge any address-less deals (incl. ones promoted before this rule).
-const purged = await c.query(`DELETE FROM deals WHERE property_address IS NULL OR btrim(property_address) = ''`);
+// DELETE ON THE REASON, NOT ON THE SYMPTOM (Phillip 2026-08-15).
+// "No address" has two opposite causes and this rule used to treat them identically:
+//   (a) THERE IS NO DOOR — HOA/association lien, timeshare interest, government plaintiff,
+//       case not found. Not a deal. Deleting is correct and keeps the CRM honest.
+//   (b) WE FAILED TO READ IT — the clerk site timed out, the complaint never downloaded, the
+//       parser missed. That is a lead we paid to find, thrown away.
+// Measured across Orange/Seminole/Lake/Volusia on 2026-08-15: of 311 address-less leads only
+// 38 had no door. 273 — 88% — were ours to recover, and the two biggest buckets (245) were
+// documents we never even fetched.
+// Deleting those is also what made the 2026-07-14 -> 08-11 outage invisible: the failures were
+// removed, so the screen stayed clean while 70% of the pipeline vanished. A retry queue that
+// grows is a symptom you can SEE.
+const NO_DOOR = `review_reason ~* '(hoa|assoc|timeshare|gov_plaintiff|case_not_found)'`;
+const purged = await c.query(`DELETE FROM deals d
+  WHERE (d.property_address IS NULL OR btrim(d.property_address) = '')
+    AND d.source_type = 'preforeclosure'
+    AND EXISTS (SELECT 1 FROM foreclosure_leads f WHERE f.case_number = d.source_ref AND ${NO_DOOR})`);
+// Auctions carry no review_reason; an address-less auction row is unusable either way.
+const purgedAuction = await c.query(`DELETE FROM deals WHERE source_type='auction' AND (property_address IS NULL OR btrim(property_address) = '')`);
+// Everything else with no address STAYS, flagged for retry, and is counted so it is visible.
+const { rows: [kept] } = await c.query(`SELECT count(*)::int AS n FROM foreclosure_leads
+  WHERE (property_address IS NULL OR btrim(property_address) = '') AND NOT (${NO_DOOR}) OR (review_reason IS NULL AND (property_address IS NULL OR btrim(property_address)=''))`);
 
 // Same treatment for HOA/association plaintiffs — 2nd-position liens, never a door-knock.
 // This is the CENTRAL guard: the per-county scrapers each apply their own filter and they
@@ -68,5 +89,5 @@ const dup = await c.query(`WITH norm AS (SELECT id, lower(regexp_replace(COALESC
  dups AS (SELECT k FROM norm GROUP BY k HAVING count(DISTINCT source_type)>1 AND k<>'')
  UPDATE deals d SET duplicate=true, dup_group=n.k FROM norm n JOIN dups ON n.k=dups.k WHERE d.id=n.id`);
 
-log(`deals synced — preforeclosure ${pre.rowCount}, auction ${auc.rowCount}, purged(no-address) ${purged.rowCount}, purged(HOA) ${hoaPurged.rowCount}, duplicates ${dup.rowCount}`);
+log(`deals synced — preforeclosure ${pre.rowCount}, auction ${auc.rowCount}, purged(no-door) ${purged.rowCount + purgedAuction.rowCount}, KEPT for retry ${kept.n}, purged(HOA) ${hoaPurged.rowCount}, duplicates ${dup.rowCount}`);
 await c.end();

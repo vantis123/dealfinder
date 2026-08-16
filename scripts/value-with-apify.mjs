@@ -109,11 +109,19 @@ if (rows.length && APIFY_TOKENS.length) {
   const addresses = rows.map(r => r.property_address);
   // Start the actor: per token, retry transient errors twice; on a hard "usage limit exceeded",
   // alternate to the next account immediately.
+  //
+  // `maxItems` is REQUIRED. maxcopell~zillow-detail-scraper is a pay-per-result actor, and without
+  // it the PRIMARY account refuses every run with:
+  //     {"type":"max-items-must-be-greater-than-zero",
+  //      "message":"Maximum charged results must be greater than zero"}
+  // The rotation then read that as "capped" and fell through to the standby — so every valuation
+  // was being billed to the SMALLER account ($2.18 left) while the primary sat unused ($4.48).
+  // Diagnosed 2026-08-15 from a live run. One address in, one result out, so cap it at the batch size.
   let runId, datasetId;
   for (const acct of APIFY_TOKENS) {
     for (let attempt = 0; attempt < 2 && !datasetId; attempt++) {
       if (attempt) await sleep(15000);
-      const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${acct.token}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json()).catch(e => ({ error: { message: String(e.message) } }));
+      const start = await fetch(`https://api.apify.com/v2/acts/maxcopell~zillow-detail-scraper/runs?token=${acct.token}&maxItems=${addresses.length}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addresses }) }).then(r => r.json()).catch(e => ({ error: { message: String(e.message) } }));
       runId = start.data?.id; datasetId = start.data?.defaultDatasetId;
       // Only report an alternation when we actually fell past the first account — comparing
       // against a hard-coded label silently mis-reports every run once labels change.
